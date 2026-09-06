@@ -1,0 +1,28 @@
+[package]
+name = "py-vpin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "vpin"
+# "rlib" so `cargo test`/`cargo build` produce a normal, testable Rust
+# lib linked against libpython (needed to actually run pyo3 code from
+# `cargo test`); "cdylib" is the actual Python-loadable .so that maturin
+# builds. Both from one crate, standard pyo3 project layout.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+vpin-engine = { path = "../../crates/vpin-engine" }
+pyo3        = { workspace = true }
+
+[features]
+# NOT default: "extension-module" tells pyo3 to skip linking against
+# libpython (correct for the .so Python dynamically loads, Python
+# provides those symbols itself at import time), but that breaks `cargo
+# test`/`cargo build` for a normal Rust binary/test harness, which does
+# need to link against libpython to actually run. maturin enables this
+# automatically when building the real wheel, plain `cargo test` here
+# does not.
+extension-module = ["pyo3/extension-module"]

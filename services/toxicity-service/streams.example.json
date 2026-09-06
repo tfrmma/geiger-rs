@@ -1,0 +1,28 @@
+{
+  "streams": [
+    {
+      "exchange": "binance",
+      "symbol": "BTCUSDT",
+      "bucket_volume": 50.0,
+      "sigma_window": 50,
+      "vpin_window": 50,
+      "cdf_window": 250
+    },
+    {
+      "exchange": "bybit",
+      "symbol": "ETHUSDT",
+      "bucket_volume": 300.0,
+      "sigma_window": 50,
+      "vpin_window": 50,
+      "cdf_window": 250
+    },
+    {
+      "exchange": "hyperliquid",
+      "symbol": "BTC",
+      "bucket_volume": 5.0,
+      "sigma_window": 50,
+      "vpin_window": 50,
+      "cdf_window": 250
+    }
+  ]
+}

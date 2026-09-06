@@ -1,0 +1,51 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/backoff",
+    "crates/vpin-engine",
+    "crates/trade-ingest",
+    "crates/toxicity-client-rs",
+    "services/toxicity-service",
+    "bindings/py-vpin",
+    "tools/calibrate",
+]
+
+[workspace.package]
+version      = "0.1.0"
+edition      = "2021"
+license      = "MIT"
+rust-version = "1.85"
+
+[workspace.dependencies]
+# boros-mm pins thiserror="1", but that's a separate Cargo workspace, no
+# diamond-dep concern here, so we track current stable (2.x) instead of
+# inheriting a version we have no reason to replicate.
+thiserror          = "2"
+libm               = "0.2"
+pyo3               = "0.29"
+tokio              = { version = "1", features = ["full"] }
+# boros-mm pins tokio-tungstenite="0.21" (9 minor versions behind current
+# as of writing), same reasoning as thiserror: no shared Rust API between
+# our WS client and theirs, no diamond-dep, no reason to inherit a stale
+# pin here.
+tokio-tungstenite  = "0.30"
+futures-util       = { version = "0.3", features = ["sink"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = "1"
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# feedhandler-core-rs's crate name is "feedhandler" (repo name != package
+# name). Not on crates.io, pulled straight from the repo so NormalizedTrade
+# can reuse its exact Price/Qty/Symbol/Exchange types, no duplicate/drift-
+# prone parallel type definitions between the book side and the trade side.
+feedhandler        = { git = "https://github.com/tfrmma/feedhandler-core-rs" }
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+
+[profile.bench]
+inherits = "release"
+debug    = true

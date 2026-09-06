@@ -1,0 +1,14 @@
+[package]
+name = "vpin-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+libm      = { workspace = true }
+
+[dev-dependencies]
+# Same exact pin as feedhandler-core-rs, no reason for these two to drift.
+proptest = { version = "=1.4.0", default-features = false, features = ["std"] }
