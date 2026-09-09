@@ -23,7 +23,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use feedhandler::{Exchange, Symbol};
 
-use backoff::ExponentialBackoff;
+use backoff::{BackoffConfig, ExponentialBackoff};
 use crate::types::{parse_price, parse_qty, NormalizedTrade, TakerSide};
 use crate::IngestError;
 
@@ -55,17 +55,17 @@ fn build_url(symbol_lower: &str) -> String {
     format!("{BASE_URL}?streams={symbol_lower}@aggTrade")
 }
 
-/// Runs forever, reconnecting with backoff on any disconnect or error.
-/// Lowercases `symbol` itself since Binance stream names are
+/// Runs forever, reconnecting with `backoff_cfg` on any disconnect or
+/// error. Lowercases `symbol` itself since Binance stream names are
 /// case-sensitive-lowercase, the caller's own casing doesn't matter.
 /// Takes an owned `String` rather than `&str`: this gets moved into a
 /// `tokio::spawn`'d task by every caller we have, which needs `'static`,
 /// a borrow from a caller's loop-local config can't satisfy that.
-pub async fn run(symbol: String, tx: mpsc::UnboundedSender<NormalizedTrade>) {
+pub async fn run(symbol: String, tx: mpsc::UnboundedSender<NormalizedTrade>, backoff_cfg: BackoffConfig) {
     let symbol_lower = symbol.to_ascii_lowercase();
     let normalized_symbol = Symbol::from_bytes(symbol.to_ascii_uppercase().as_bytes());
     let url = build_url(&symbol_lower);
-    let mut backoff = ExponentialBackoff::default();
+    let mut backoff = backoff_cfg.build();
     let mut sequence: u64 = 0;
 
     loop {
