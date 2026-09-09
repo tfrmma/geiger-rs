@@ -5,6 +5,7 @@
 
 use std::time::Duration;
 
+use backoff::BackoffConfig;
 use serde::Deserialize;
 
 fn required(name: &str) -> String {
@@ -31,6 +32,29 @@ pub struct StreamConfig {
     pub sigma_window: usize,
     pub vpin_window: usize,
     pub cdf_window: Option<usize>,
+    /// Reconnect backoff override for this stream. `None` for both
+    /// fields (the common case, and what every entry in
+    /// `streams.example.json` uses) falls back to `BackoffConfig`'s
+    /// default, see that type's doc comment for why it's a reasonable
+    /// starting point for all three venues. Override per-stream if
+    /// you're running many symbols on the same exchange from one IP and
+    /// want to spread out reconnect attempts, or you have your own
+    /// observed rate-limit behavior that suggests something more
+    /// conservative.
+    #[serde(default)]
+    pub backoff_base_ms: Option<u64>,
+    #[serde(default)]
+    pub backoff_max_secs: Option<u64>,
+}
+
+impl StreamConfig {
+    pub fn backoff_config(&self) -> BackoffConfig {
+        let default = BackoffConfig::default();
+        BackoffConfig {
+            base: self.backoff_base_ms.map(Duration::from_millis).unwrap_or(default.base),
+            max: self.backoff_max_secs.map(Duration::from_secs).unwrap_or(default.max),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -42,6 +66,11 @@ pub struct ServiceConfig {
     pub bind_addr: String,
     pub streams: Vec<StreamConfig>,
     pub heartbeat_interval: Duration,
+    /// `None` if `GEIGER_AUTH_TOKEN` isn't set, meaning no auth is
+    /// enforced on the WS endpoint. Fine for localhost/VPN-only
+    /// deployments, not fine for anything with a public-reachable bind
+    /// address.
+    pub auth_token: Option<String>,
 }
 
 impl ServiceConfig {
@@ -60,6 +89,7 @@ impl ServiceConfig {
             bind_addr: optional_string("GEIGER_BIND_ADDR", "0.0.0.0:9700"),
             streams: file.streams,
             heartbeat_interval: Duration::from_secs(optional_u64("GEIGER_HEARTBEAT_SECS", 5)),
+            auth_token: std::env::var("GEIGER_AUTH_TOKEN").ok().filter(|s| !s.is_empty()),
         }
     }
 }
@@ -128,5 +158,30 @@ mod tests {
         let json = r#"{"streams":[{"exchange":"bybit","symbol":"ETHUSDT","bucket_volume":10.0,"sigma_window":20,"vpin_window":20}]}"#;
         let file: StreamsFile = serde_json::from_str(json).unwrap();
         assert_eq!(file.streams[0].cdf_window, None);
+    }
+
+    #[test]
+    fn backoff_config_falls_back_to_default_when_unset() {
+        let json = r#"{"exchange":"binance","symbol":"BTCUSDT","bucket_volume":50.0,"sigma_window":50,"vpin_window":50}"#;
+        let cfg: StreamConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.backoff_config(), BackoffConfig::default());
+    }
+
+    #[test]
+    fn backoff_config_uses_per_stream_override_when_set() {
+        let json = r#"{"exchange":"binance","symbol":"BTCUSDT","bucket_volume":50.0,"sigma_window":50,"vpin_window":50,"backoff_base_ms":500,"backoff_max_secs":60}"#;
+        let cfg: StreamConfig = serde_json::from_str(json).unwrap();
+        let resolved = cfg.backoff_config();
+        assert_eq!(resolved.base, Duration::from_millis(500));
+        assert_eq!(resolved.max, Duration::from_secs(60));
+    }
+
+    #[test]
+    fn backoff_config_allows_overriding_only_one_field() {
+        let json = r#"{"exchange":"binance","symbol":"BTCUSDT","bucket_volume":50.0,"sigma_window":50,"vpin_window":50,"backoff_base_ms":500}"#;
+        let cfg: StreamConfig = serde_json::from_str(json).unwrap();
+        let resolved = cfg.backoff_config();
+        assert_eq!(resolved.base, Duration::from_millis(500));
+        assert_eq!(resolved.max, BackoffConfig::default().max); // untouched field keeps the default
     }
 }
