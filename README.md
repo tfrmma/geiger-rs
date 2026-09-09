@@ -101,6 +101,7 @@ comes from a JSON file:
 export GEIGER_STREAMS_FILE=services/toxicity-service/streams.example.json
 export GEIGER_BIND_ADDR=0.0.0.0:9700   # default shown
 export GEIGER_HEARTBEAT_SECS=5          # default shown
+export GEIGER_AUTH_TOKEN=some-shared-secret  # optional, unset = no auth
 cargo run -p toxicity-service
 ```
 
@@ -112,7 +113,8 @@ a calibration. `bucket_volume` in particular is instrument-specific, run
 
 ```rust
 let client = toxicity_client_rs::ToxicityClient::connect(
-    "ws://127.0.0.1:9700", "binance", "BTCUSDT", Duration::from_secs(15),
+    "ws://127.0.0.1:9700", "binance", "BTCUSDT",
+    Duration::from_secs(15), backoff::BackoffConfig::default(),
 );
 
 match client.state() {
@@ -156,6 +158,27 @@ specific to your instrument.
 
 ## Operational notes
 
+- `GEIGER_AUTH_TOKEN` is unset by default, meaning the WS endpoint has no
+  auth and anyone who can reach the bind address can subscribe. Set it
+  for anything that isn't purely localhost/VPN-only; the server checks
+  it as a `Authorization: Bearer <token>` header during the WS handshake
+  itself, an unauthorized client never completes the connection.
+- The exchange adapters have not been run against live exchange
+  connections as part of this repo's own test suite; wire parsing is
+  tested against literal examples from each venue's documentation.
+  Verify against testnet or a throwaway symbol before running against
+  real markets.
+- Reconnect backoff (`BackoffConfig`: base delay, max delay, doubling
+  in between) defaults to 250ms/30s, checked against each venue's
+  documented per-IP connection-attempt limits. Override per-stream via
+  `backoff_base_ms`/`backoff_max_secs` in `GEIGER_STREAMS_FILE` if you're
+  running many symbols on one exchange from one IP; the default doesn't
+  coordinate reconnect timing across streams, so a shared outage can
+  still cause a burst of simultaneous reconnect attempts.
+- Hyperliquid's `side` field semantics (`"A"`/`"B"`) are documented here
+  based on third-party API references rather than Hyperliquid's own
+  docs, which type the field without explaining it. Worth confirming
+  independently if fill direction ever looks wrong.
 - Binance USDⓈ-M futures requires the routed WebSocket endpoints
   (`/market/...`); the legacy unrouted URLs some older examples online
   still reference are decommissioned.
