@@ -10,6 +10,7 @@
 //!     "binance",
 //!     "BTCUSDT",
 //!     Duration::from_secs(15),
+//!     backoff::BackoffConfig::default(),
 //! );
 //!
 //! // in the quoting loop, synchronous, no await:
@@ -23,7 +24,7 @@
 //! ```
 //!
 //! Reconnect and staleness-detection logic is tested here against a
-//! fake WS server on loopback (see `tests` below), a real socket, not a
+//! WS server on loopback (see `tests` below), a real socket, not a
 //! mocked transport. Not tested against a real `toxicity-service`
 //! process end-to-end.
 
@@ -36,7 +37,7 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::watch;
 use tokio_tungstenite::tungstenite::Message;
 
-use backoff::ExponentialBackoff;
+use backoff::{BackoffConfig, ExponentialBackoff};
 use toxicity_service::protocol::{ServerMessage, SubscribeRequest};
 
 pub use error::ClientError;
@@ -59,16 +60,17 @@ impl Drop for ToxicityClient {
 
 impl ToxicityClient {
     /// Spawns the background connection immediately. Reconnects forever
-    /// with backoff, same pattern as `trade-ingest`'s adapters, this
+    /// per `backoff_cfg`, same pattern as `trade-ingest`'s adapters, this
     /// never gives up on its own.
     pub fn connect(
         url: impl Into<String>,
         exchange: impl Into<String>,
         symbol: impl Into<String>,
         stale_after: Duration,
+        backoff_cfg: BackoffConfig,
     ) -> Self {
         let (tx, rx) = watch::channel(ToxicityState::Connecting);
-        let task = tokio::spawn(run(url.into(), exchange.into(), symbol.into(), stale_after, tx));
+        let task = tokio::spawn(run(url.into(), exchange.into(), symbol.into(), stale_after, backoff_cfg, tx));
         ToxicityClient { rx, task }
     }
 
@@ -80,8 +82,15 @@ impl ToxicityClient {
     }
 }
 
-async fn run(url: String, exchange: String, symbol: String, stale_after: Duration, tx: watch::Sender<ToxicityState>) {
-    let mut backoff = ExponentialBackoff::default();
+async fn run(
+    url: String,
+    exchange: String,
+    symbol: String,
+    stale_after: Duration,
+    backoff_cfg: BackoffConfig,
+    tx: watch::Sender<ToxicityState>,
+) {
+    let mut backoff = backoff_cfg.build();
     loop {
         let _ = tx.send(ToxicityState::Connecting);
         match run_once(&url, &exchange, &symbol, stale_after, &tx, &mut backoff).await {
@@ -234,7 +243,7 @@ mod tests {
     async fn goes_from_connecting_to_live_on_a_reading() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30));
+        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30), BackoffConfig::default());
 
         assert_eq!(client.state(), ToxicityState::Connecting);
 
@@ -257,7 +266,7 @@ mod tests {
     async fn warmup_reading_maps_to_warming_not_live() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "bybit", "ETHUSDT", Duration::from_secs(30));
+        let client = ToxicityClient::connect(url, "bybit", "ETHUSDT", Duration::from_secs(30), BackoffConfig::default());
 
         tx.send(ServerMessage::Reading {
             exchange: "bybit".into(),
@@ -279,7 +288,7 @@ mod tests {
     async fn goes_stale_when_messages_stop_arriving() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "hyperliquid", "BTC", Duration::from_millis(100));
+        let client = ToxicityClient::connect(url, "hyperliquid", "BTC", Duration::from_millis(100), BackoffConfig::default());
 
         tx.send(ServerMessage::Heartbeat { ts_ns: 0 }).unwrap();
         wait_for(&client, |s| !matches!(s, ToxicityState::Connecting)).await;
@@ -295,7 +304,7 @@ mod tests {
     async fn heartbeat_does_not_downgrade_an_existing_live_reading() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30));
+        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30), BackoffConfig::default());
 
         tx.send(ServerMessage::Reading {
             exchange: "binance".into(),
@@ -320,7 +329,7 @@ mod tests {
     async fn dropping_the_client_ends_the_background_task() {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30));
+        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30), BackoffConfig::default());
         let task = client.task.abort_handle();
         drop(client);
         // give the runtime a moment to actually process the abort
