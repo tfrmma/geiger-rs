@@ -29,7 +29,7 @@ use tokio_tungstenite::tungstenite::Message;
 
 use feedhandler::{Exchange, Symbol};
 
-use backoff::ExponentialBackoff;
+use backoff::{BackoffConfig, ExponentialBackoff};
 use crate::types::{parse_price, parse_qty, NormalizedTrade, TakerSide};
 use crate::IngestError;
 
@@ -53,9 +53,9 @@ struct WsTrade {
 }
 
 /// See `binance::run`'s doc comment for why this takes an owned `String`.
-pub async fn run(coin: String, tx: mpsc::UnboundedSender<NormalizedTrade>) {
+pub async fn run(coin: String, tx: mpsc::UnboundedSender<NormalizedTrade>, backoff_cfg: BackoffConfig) {
     let normalized_symbol = Symbol::from_bytes(coin.as_bytes());
-    let mut backoff = ExponentialBackoff::default();
+    let mut backoff = backoff_cfg.build();
     let mut sequence: u64 = 0;
 
     loop {
