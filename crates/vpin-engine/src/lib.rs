@@ -15,15 +15,19 @@
 //! mechanical byproduct of trading intensity, and that it peaked AFTER,
 //! not before, the 2010 Flash Crash. `VpinReading::trades_in_bucket` is
 //! exposed specifically so a consumer can control for trading intensity
-//! instead of reacting to raw VPIN, this crate deliberately doesn't try
-//! to correct for it internally, that's a downstream policy decision.
+//! instead of reacting to raw VPIN. `IntensityAdjustedCdf` is a
+//! reference implementation of one way to do that (rank a reading
+//! against similarly-busy buckets rather than all buckets), not the only
+//! correct one, real policy decisions here belong downstream.
 
 mod bucket;
 mod bvc;
 mod error;
+mod intensity;
 mod vpin;
 
 pub use bucket::{ClosedBucket, VolumeBucketer};
 pub use bvc::{buy_fraction, classify};
 pub use error::VpinError;
+pub use intensity::IntensityAdjustedCdf;
 pub use vpin::{EmpiricalCdf, RollingSigma, VpinEngine, VpinEngineConfig, VpinReading};
