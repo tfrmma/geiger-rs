@@ -3,6 +3,14 @@
 //! `bucket_volume` x `window` you give it, and print descriptive stats
 //! for each so a human can pick a reasonable pair.
 //!
+//! Also reports how often BVC's probabilistic buy/sell call actually
+//! matches the real taker side each exchange adapter captures in
+//! `NormalizedTrade::taker_side` (`bvc_accuracy`/`bvc_mae` columns).
+//! `vpin-engine` never looks at this field by design (BVC exists
+//! specifically to avoid needing it), this is what lets you check how
+//! much that probabilistic classification actually costs you on your
+//! own instrument instead of taking it on faith.
+//!
 //! This is NOT `realistic-mm-backtester`: there's no fill simulation, no
 //! PnL, no order queue, this only measures the VPIN estimator itself
 //! (does it warm up in a reasonable fraction of the tape, what's its
@@ -36,7 +44,15 @@ use std::env;
 use std::process::ExitCode;
 
 use trade_ingest::capture::TradeReader;
-use vpin_engine::{VpinEngine, VpinEngineConfig, VpinError};
+use trade_ingest::TakerSide;
+use vpin_engine::{classify, RollingSigma, VolumeBucketer, VpinEngine, VpinEngineConfig, VpinError};
+
+struct Trade {
+    price: f64,
+    volume: f64,
+    ts_ns: u64,
+    taker_side: TakerSide,
+}
 
 struct Args {
     file: String,
@@ -98,14 +114,20 @@ struct Stats {
     /// "if I pick this bucket_volume, how often do I actually get a
     /// fresh reading" independent of what VPIN's value comes out to.
     avg_bucket_interval_ms: f64,
+    /// Fraction of buckets where BVC's majority-side call (buy_fraction
+    /// > 0.5) agreed with the real taker-side majority (by volume) for
+    /// that bucket, using the ground truth every exchange adapter
+    /// captures in `NormalizedTrade::taker_side` but `vpin-engine` never
+    /// looks at. `NaN` if sigma never warmed up for this config.
+    bvc_accuracy: f64,
+    /// Mean |BVC's buy_fraction - true volume-weighted buy_fraction|
+    /// across compared buckets. Complements `bvc_accuracy`: two configs
+    /// can have the same majority-call accuracy while one is
+    /// systematically closer to the true split and the other isn't.
+    bvc_mean_abs_error: f64,
 }
 
-fn calibrate_one(
-    trades: &[(f64, f64, u64)],
-    bucket_volume: f64,
-    window: usize,
-    cdf_window: Option<usize>,
-) -> Result<Stats, VpinError> {
+fn calibrate_one(trades: &[Trade], bucket_volume: f64, window: usize, cdf_window: Option<usize>) -> Result<Stats, VpinError> {
     let mut engine = VpinEngine::new(VpinEngineConfig {
         bucket_volume,
         sigma_window: window,
@@ -117,8 +139,8 @@ fn calibrate_one(
     let mut vpins = Vec::new();
     let mut close_times = Vec::new();
 
-    for &(price, volume, ts_ns) in trades {
-        if let Some(reading) = engine.push_trade(price, volume, ts_ns) {
+    for t in trades {
+        if let Some(reading) = engine.push_trade(t.price, t.volume, t.ts_ns) {
             total_buckets += 1;
             close_times.push(reading.ts_close_ns);
             if let Some(v) = reading.vpin {
@@ -128,6 +150,7 @@ fn calibrate_one(
     }
 
     let (vpin_mean, vpin_min, vpin_max, vpin_stddev) = summarize(&vpins);
+    let (bvc_accuracy, bvc_mean_abs_error) = bvc_accuracy_stats(trades, bucket_volume, window)?;
 
     Ok(Stats {
         bucket_volume,
@@ -139,7 +162,59 @@ fn calibrate_one(
         vpin_max,
         vpin_stddev,
         avg_bucket_interval_ms: mean_interval_ms(&close_times),
+        bvc_accuracy,
+        bvc_mean_abs_error,
     })
+}
+
+/// Replays the same trades through the lower-level pieces
+/// (`VolumeBucketer` + `RollingSigma` + `bvc::classify`) that
+/// `VpinEngine` itself uses internally, so BVC's per-bucket call can be
+/// compared against the real taker-side volume split for that bucket.
+/// `VpinEngine`'s own public API only exposes the aggregated VPIN score,
+/// not a per-bucket buy_fraction, so this can't be read off the first
+/// pass above, it needs its own pass over the same data. Same sigma
+/// discipline as `VpinEngine::push_trade`: classify with sigma from
+/// before this bucket, advance sigma with this bucket's own delta_p
+/// only after.
+fn bvc_accuracy_stats(trades: &[Trade], bucket_volume: f64, sigma_window: usize) -> Result<(f64, f64), VpinError> {
+    let mut bucketer = VolumeBucketer::new(bucket_volume)?;
+    let mut sigma = RollingSigma::new(sigma_window)?;
+
+    let mut buy_vol = 0.0;
+    let mut sell_vol = 0.0;
+    let mut correct = 0u64;
+    let mut compared = 0u64;
+    let mut abs_errors = Vec::new();
+
+    for t in trades {
+        match t.taker_side {
+            TakerSide::Buy => buy_vol += t.volume,
+            TakerSide::Sell => sell_vol += t.volume,
+        }
+
+        if let Some(closed) = bucketer.push(t.price, t.volume, t.ts_ns) {
+            if let Some(sigma_before) = sigma.current() {
+                if let Some((bvc_buy, _)) = classify(closed.delta_p, sigma_before, closed.volume) {
+                    let bvc_frac = bvc_buy / closed.volume;
+                    let true_frac = buy_vol / (buy_vol + sell_vol);
+
+                    if (bvc_frac > 0.5) == (true_frac > 0.5) {
+                        correct += 1;
+                    }
+                    abs_errors.push((bvc_frac - true_frac).abs());
+                    compared += 1;
+                }
+            }
+            sigma.push(closed.delta_p);
+            buy_vol = 0.0;
+            sell_vol = 0.0;
+        }
+    }
+
+    let accuracy = if compared > 0 { correct as f64 / compared as f64 } else { f64::NAN };
+    let mae = if abs_errors.is_empty() { f64::NAN } else { abs_errors.iter().sum::<f64>() / abs_errors.len() as f64 };
+    Ok((accuracy, mae))
 }
 
 fn summarize(values: &[f64]) -> (f64, f64, f64, f64) {
@@ -165,27 +240,44 @@ fn mean_interval_ms(close_times_ns: &[u64]) -> f64 {
     (span_ns as f64 / (close_times_ns.len() - 1) as f64) / 1e6
 }
 
-fn load_trades(path: &str) -> Result<Vec<(f64, f64, u64)>, String> {
+fn load_trades(path: &str) -> Result<Vec<Trade>, String> {
     let reader = TradeReader::open(path).map_err(|e| format!("opening {path}: {e}"))?;
     reader
-        .map(|r| r.map(|t| (t.price.raw() as f64 / 1e8, t.qty.raw() as f64 / 1e8, t.ts_exchange_ns)))
+        .map(|r| {
+            r.map(|t| Trade {
+                price: t.price.raw() as f64 / 1e8,
+                volume: t.qty.raw() as f64 / 1e8,
+                ts_ns: t.ts_exchange_ns,
+                taker_side: t.taker_side,
+            })
+        })
         .collect::<std::io::Result<Vec<_>>>()
         .map_err(|e| format!("reading {path}: {e}"))
 }
 
-fn print_report(trades_len: usize, file: &str, bucket_volumes: &[f64], windows: &[usize], cdf_window: Option<usize>, trades: &[(f64, f64, u64)]) {
+fn print_report(trades_len: usize, file: &str, bucket_volumes: &[f64], windows: &[usize], cdf_window: Option<usize>, trades: &[Trade]) {
     println!("loaded {trades_len} trades from {file}");
     println!();
     println!(
-        "{:>14} {:>8} {:>14} {:>16} {:>10} {:>10} {:>10} {:>10} {:>18}",
-        "bucket_volume", "window", "total_buckets", "non_warmup_reads", "vpin_mean", "vpin_min", "vpin_max", "vpin_std", "avg_interval_ms"
+        "{:>14} {:>8} {:>14} {:>16} {:>10} {:>10} {:>10} {:>10} {:>18} {:>12} {:>10}",
+        "bucket_volume",
+        "window",
+        "total_buckets",
+        "non_warmup_reads",
+        "vpin_mean",
+        "vpin_min",
+        "vpin_max",
+        "vpin_std",
+        "avg_interval_ms",
+        "bvc_accuracy",
+        "bvc_mae"
     );
 
     for &bucket_volume in bucket_volumes {
         for &window in windows {
             match calibrate_one(trades, bucket_volume, window, cdf_window) {
                 Ok(s) => println!(
-                    "{:>14.4} {:>8} {:>14} {:>16} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>18.1}",
+                    "{:>14.4} {:>8} {:>14} {:>16} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>18.1} {:>12.4} {:>10.4}",
                     s.bucket_volume,
                     s.window,
                     s.total_buckets,
@@ -194,12 +286,19 @@ fn print_report(trades_len: usize, file: &str, bucket_volumes: &[f64], windows: 
                     s.vpin_min,
                     s.vpin_max,
                     s.vpin_stddev,
-                    s.avg_bucket_interval_ms
+                    s.avg_bucket_interval_ms,
+                    s.bvc_accuracy,
+                    s.bvc_mean_abs_error,
                 ),
                 Err(e) => println!("{bucket_volume:>14.4} {window:>8}  invalid config: {e}"),
             }
         }
     }
+    println!();
+    println!(
+        "bvc_accuracy: fraction of buckets where BVC's buy/sell majority call matched the real taker-side majority (by volume)."
+    );
+    println!("bvc_mae: mean |BVC's buy_fraction - true buy_fraction| across compared buckets. Both NaN if sigma never warmed up.");
 }
 
 fn main() -> ExitCode {
@@ -300,7 +399,7 @@ mod tests {
 
     #[test]
     fn calibrate_one_reports_invalid_config_as_error_not_panic() {
-        let trades = vec![(100.0, 1.0, 0u64)];
+        let trades = vec![Trade { price: 100.0, volume: 1.0, ts_ns: 0, taker_side: TakerSide::Buy }];
         let result = calibrate_one(&trades, -5.0, 10, None);
         assert!(result.is_err());
     }
@@ -317,12 +416,56 @@ mod tests {
         let mut price = 100.0;
         for i in 0..500u64 {
             price += if i % 2 == 0 { 0.4 } else { -0.25 };
-            trades.push((price, 10.0, i * 1_000_000));
+            let taker_side = if i % 2 == 0 { TakerSide::Buy } else { TakerSide::Sell };
+            trades.push(Trade { price, volume: 10.0, ts_ns: i * 1_000_000, taker_side });
         }
         let stats = calibrate_one(&trades, 10.0, 10, Some(20)).unwrap();
         assert!(stats.total_buckets > 0);
         assert!(stats.non_warmup_readings > 0);
         assert!(stats.vpin_mean >= 0.0 && stats.vpin_mean <= 1.0);
         assert!(!stats.avg_bucket_interval_ms.is_nan());
+        assert!(!stats.bvc_accuracy.is_nan(), "expected BVC accuracy to be computed once sigma warms up");
+        assert!((0.0..=1.0).contains(&stats.bvc_accuracy));
+        assert!(stats.bvc_mean_abs_error >= 0.0);
+    }
+
+    #[test]
+    fn bvc_accuracy_is_nan_before_sigma_warms_up() {
+        // window=1000 on a 5-trade tape: sigma never fills, nothing to
+        // compare, this must report NaN rather than a misleading 0% or
+        // panicking on an empty average.
+        let trades = (0..5u64)
+            .map(|i| Trade { price: 100.0 + i as f64, volume: 10.0, ts_ns: i, taker_side: TakerSide::Buy })
+            .collect::<Vec<_>>();
+        let (accuracy, mae) = bvc_accuracy_stats(&trades, 10.0, 1000).unwrap();
+        assert!(accuracy.is_nan());
+        assert!(mae.is_nan());
+    }
+
+    #[test]
+    fn bvc_accuracy_is_perfect_when_every_trade_pushes_price_with_its_own_side() {
+        // Construct a tape where every single trade is BOTH the entire
+        // bucket (bucket_volume == trade volume) AND its price move is
+        // signed exactly the way its taker_side says: buys push price
+        // up, sells push it down. BVC classifies buckets by delta_p, so
+        // this is the case where BVC's signal and the ground truth are,
+        // by construction, perfectly aligned, accuracy has to be 1.0.
+        let mut trades = Vec::new();
+        let mut price = 1000.0;
+        let mut state: u64 = 42;
+        for i in 0..300u64 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let is_buy = (state >> 63) == 1;
+            price += if is_buy { 1.0 } else { -1.0 };
+            trades.push(Trade {
+                price,
+                volume: 10.0,
+                ts_ns: i,
+                taker_side: if is_buy { TakerSide::Buy } else { TakerSide::Sell },
+            });
+        }
+        let (accuracy, _mae) = bvc_accuracy_stats(&trades, 10.0, 20).unwrap();
+        assert!(!accuracy.is_nan());
+        assert!(accuracy > 0.95, "expected near-perfect accuracy on a tape constructed to align, got {accuracy}");
     }
 }
