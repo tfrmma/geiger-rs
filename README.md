@@ -68,18 +68,28 @@ predictive power for short-term volatility is largely a mechanical
 byproduct of trading intensity rather than genuine informed-trading
 detection. Every reading includes `trades_in_bucket` specifically so a
 consumer can control for intensity before reacting to the raw score.
+`IntensityAdjustedCdf` is a reference implementation of one way to do
+that: it ranks a reading against similarly-busy buckets instead of all
+buckets, so a spike that's unremarkable *for how busy things are right
+now* doesn't get treated the same as one that's genuinely unusual.
+
+Quantities from all three exchanges are in base-asset units (Binance
+USDⓈ-M futures, Bybit linear, Hyperliquid perps all confirmed against
+each venue's own contract-specification docs, not assumed), so
+`bucket_volume` means the same thing across venues, this isn't
+COIN-margined-style fixed-notional contract counts.
 
 ## Components
 
 | Path | What it is |
 |---|---|
-| `crates/vpin-engine` | Pure compute: volume-clock bucketer, BVC classification, rolling sigma, rolling VPIN, CDF transform. No I/O, no exchange-specific code. |
+| `crates/vpin-engine` | Pure compute: volume-clock bucketer, BVC classification, rolling sigma, rolling VPIN, CDF transform, plus `IntensityAdjustedCdf` (a reference intensity correction). No I/O, no exchange-specific code. |
 | `crates/trade-ingest` | WS adapters: Binance USDⓈ-M futures (`aggTrade`), Bybit v5 linear (`publicTrade`), Hyperliquid perps (`trades`). Includes `capture`, a bit-stable recorder/reader for building trade tapes offline. |
 | `crates/backoff` | Exponential backoff shared by the ingest adapters and the Rust client. |
 | `crates/toxicity-client-rs` | Rust subscriber. `ToxicityClient::connect(...)` runs in the background; `.state()` is synchronous (backed by a `watch` channel), safe to call from a hot quoting loop. |
 | `services/toxicity-service` | The service binary. Wires trade streams into per-(exchange, symbol) `vpin-engine` instances and fans out readings over a WebSocket as JSON: continuous score and CDF, not a discretized tier, that policy is left to each consumer. |
 | `bindings/py-vpin` | Python bindings (`pyo3`/`maturin`) directly over `vpin-engine`, for Python-based consumers. |
-| `tools/calibrate` | Offline: replay a captured trade tape through `vpin-engine` across a grid of `(bucket_volume, window)` values and print descriptive stats to help pick parameters for a given instrument. |
+| `tools/calibrate` | Offline: replay a captured trade tape through `vpin-engine` across a grid of `(bucket_volume, window)` values, printing descriptive stats plus how often BVC's classification actually matches the real taker side (`bvc_accuracy`/`bvc_mae`), to help pick parameters for a given instrument. |
 | `services/dashboard` | Planned, not yet implemented. |
 
 ## Getting started
@@ -152,9 +162,12 @@ cargo run -p calibrate -- trades.cap \
 
 Expects a capture file written with `trade_ingest::capture::TradeRecorder`.
 `calibrate` reports descriptive statistics (mean/spread of VPIN, warmup
-fraction, average time between bucket closes), it does not validate
-against labeled historical toxic events, that needs ground truth
-specific to your instrument.
+fraction, average time between bucket closes) plus `bvc_accuracy` and
+`bvc_mae`: how often BVC's probabilistic buy/sell call agrees with the
+real taker side each exchange adapter captures but `vpin-engine` never
+looks at, and how far off its buy fraction runs on average. It does not
+validate against labeled historical toxic events, that needs ground
+truth specific to your instrument.
 
 ## Operational notes
 
