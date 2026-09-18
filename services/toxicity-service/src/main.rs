@@ -7,16 +7,19 @@
 
 mod config;
 mod error;
+mod health;
+mod registry;
 mod server;
 mod worker;
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch, RwLock};
 
 use config::{parse_exchange, stream_key, ServiceConfig};
 use feedhandler::Exchange;
+use registry::StreamEntry;
 use vpin_engine::VpinEngineConfig;
 
 pub use error::ServiceError;
@@ -29,7 +32,9 @@ const BROADCAST_CAPACITY: usize = 1024;
 /// accepting new connections cleanly.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c().await.expect("failed to install Ctrl-C handler");
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install Ctrl-C handler");
     };
 
     #[cfg(unix)]
@@ -96,7 +101,12 @@ async fn main() {
     for (exchange, stream_cfg, engine_cfg) in resolved {
         let key = stream_key(&stream_cfg.exchange, &stream_cfg.symbol);
         let (out_tx, _out_rx) = broadcast::channel(BROADCAST_CAPACITY);
-        registry.insert(key, out_tx.clone());
+        let entry = Arc::new(StreamEntry::new(
+            stream_cfg.exchange.clone(),
+            stream_cfg.symbol.clone(),
+            out_tx,
+        ));
+        registry.insert(key, entry.clone());
 
         let (trade_tx, trade_rx) = mpsc::unbounded_channel();
         let symbol = stream_cfg.symbol.clone();
@@ -104,13 +114,25 @@ async fn main() {
 
         match exchange {
             Exchange::Binance => {
-                tokio::spawn(trade_ingest::binance::run(symbol.clone(), trade_tx, backoff_cfg));
+                tokio::spawn(trade_ingest::binance::run(
+                    symbol.clone(),
+                    trade_tx,
+                    backoff_cfg,
+                ));
             }
             Exchange::Bybit => {
-                tokio::spawn(trade_ingest::bybit::run(symbol.clone(), trade_tx, backoff_cfg));
+                tokio::spawn(trade_ingest::bybit::run(
+                    symbol.clone(),
+                    trade_tx,
+                    backoff_cfg,
+                ));
             }
             Exchange::Hyperliquid => {
-                tokio::spawn(trade_ingest::hyperliquid::run(symbol.clone(), trade_tx, backoff_cfg));
+                tokio::spawn(trade_ingest::hyperliquid::run(
+                    symbol.clone(),
+                    trade_tx,
+                    backoff_cfg,
+                ));
             }
         }
 
@@ -119,14 +141,20 @@ async fn main() {
             symbol,
             engine_cfg,
             trade_rx,
-            out_tx,
+            entry,
             cfg.heartbeat_interval,
         ));
 
         tracing::info!(exchange = %stream_cfg.exchange, symbol = %stream_cfg.symbol, "stream started");
     }
 
-    let registry: server::Registry = Arc::new(registry);
+    let registry: registry::Registry = Arc::new(RwLock::new(registry));
+    let health_addr = cfg.health_bind_addr.clone();
+    let health_registry = registry.clone();
+    tokio::spawn(async move {
+        health::run(&health_addr, health_registry).await;
+    });
+
     let auth_token: server::AuthToken = cfg.auth_token.map(Arc::from);
     if auth_token.is_none() {
         tracing::warn!("GEIGER_AUTH_TOKEN not set, the WS endpoint has no auth, fine for localhost/VPN-only, not fine otherwise");
