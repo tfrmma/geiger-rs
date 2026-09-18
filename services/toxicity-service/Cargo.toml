@@ -8,7 +8,9 @@ rust-version.workspace = true
 [dependencies]
 vpin-engine        = { path = "../../crates/vpin-engine" }
 trade-ingest       = { path = "../../crates/trade-ingest" }
+backoff            = { path = "../../crates/backoff" }
 feedhandler        = { workspace = true }
+rustls             = { workspace = true }
 tokio              = { workspace = true }
 tokio-tungstenite  = { workspace = true }
 futures-util       = { workspace = true }
