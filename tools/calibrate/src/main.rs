@@ -45,7 +45,9 @@ use std::process::ExitCode;
 
 use trade_ingest::capture::TradeReader;
 use trade_ingest::TakerSide;
-use vpin_engine::{classify, RollingSigma, VolumeBucketer, VpinEngine, VpinEngineConfig, VpinError};
+use vpin_engine::{
+    classify, RollingSigma, VolumeBucketer, VpinEngine, VpinEngineConfig, VpinError,
+};
 
 struct Trade {
     price: f64,
@@ -72,12 +74,18 @@ fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args, String> {
     let mut cdf_window = None;
 
     while let Some(flag) = args.next() {
-        let value = args.next().ok_or_else(|| format!("missing value for {flag}"))?;
+        let value = args
+            .next()
+            .ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
             "--bucket-volumes" => bucket_volumes = Some(parse_csv(&value, "--bucket-volumes")?),
             "--windows" => windows = Some(parse_csv(&value, "--windows")?),
             "--cdf-window" => {
-                cdf_window = Some(value.parse::<usize>().map_err(|e| format!("bad --cdf-window {value:?}: {e}"))?)
+                cdf_window = Some(
+                    value
+                        .parse::<usize>()
+                        .map_err(|e| format!("bad --cdf-window {value:?}: {e}"))?,
+                )
             }
             other => return Err(format!("unknown flag: {other}\n{USAGE}")),
         }
@@ -85,7 +93,8 @@ fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args, String> {
 
     Ok(Args {
         file,
-        bucket_volumes: bucket_volumes.ok_or_else(|| format!("missing --bucket-volumes\n{USAGE}"))?,
+        bucket_volumes: bucket_volumes
+            .ok_or_else(|| format!("missing --bucket-volumes\n{USAGE}"))?,
         windows: windows.ok_or_else(|| format!("missing --windows\n{USAGE}"))?,
         cdf_window,
     })
@@ -96,7 +105,11 @@ where
     T::Err: std::fmt::Display,
 {
     s.split(',')
-        .map(|x| x.trim().parse::<T>().map_err(|e| format!("bad value {x:?} for {flag}: {e}")))
+        .map(|x| {
+            x.trim()
+                .parse::<T>()
+                .map_err(|e| format!("bad value {x:?} for {flag}: {e}"))
+        })
         .collect()
 }
 
@@ -127,7 +140,12 @@ struct Stats {
     bvc_mean_abs_error: f64,
 }
 
-fn calibrate_one(trades: &[Trade], bucket_volume: f64, window: usize, cdf_window: Option<usize>) -> Result<Stats, VpinError> {
+fn calibrate_one(
+    trades: &[Trade],
+    bucket_volume: f64,
+    window: usize,
+    cdf_window: Option<usize>,
+) -> Result<Stats, VpinError> {
     let mut engine = VpinEngine::new(VpinEngineConfig {
         bucket_volume,
         sigma_window: window,
@@ -177,7 +195,11 @@ fn calibrate_one(trades: &[Trade], bucket_volume: f64, window: usize, cdf_window
 /// discipline as `VpinEngine::push_trade`: classify with sigma from
 /// before this bucket, advance sigma with this bucket's own delta_p
 /// only after.
-fn bvc_accuracy_stats(trades: &[Trade], bucket_volume: f64, sigma_window: usize) -> Result<(f64, f64), VpinError> {
+fn bvc_accuracy_stats(
+    trades: &[Trade],
+    bucket_volume: f64,
+    sigma_window: usize,
+) -> Result<(f64, f64), VpinError> {
     let mut bucketer = VolumeBucketer::new(bucket_volume)?;
     let mut sigma = RollingSigma::new(sigma_window)?;
 
@@ -212,8 +234,16 @@ fn bvc_accuracy_stats(trades: &[Trade], bucket_volume: f64, sigma_window: usize)
         }
     }
 
-    let accuracy = if compared > 0 { correct as f64 / compared as f64 } else { f64::NAN };
-    let mae = if abs_errors.is_empty() { f64::NAN } else { abs_errors.iter().sum::<f64>() / abs_errors.len() as f64 };
+    let accuracy = if compared > 0 {
+        correct as f64 / compared as f64
+    } else {
+        f64::NAN
+    };
+    let mae = if abs_errors.is_empty() {
+        f64::NAN
+    } else {
+        abs_errors.iter().sum::<f64>() / abs_errors.len() as f64
+    };
     Ok((accuracy, mae))
 }
 
@@ -255,7 +285,14 @@ fn load_trades(path: &str) -> Result<Vec<Trade>, String> {
         .map_err(|e| format!("reading {path}: {e}"))
 }
 
-fn print_report(trades_len: usize, file: &str, bucket_volumes: &[f64], windows: &[usize], cdf_window: Option<usize>, trades: &[Trade]) {
+fn print_report(
+    trades_len: usize,
+    file: &str,
+    bucket_volumes: &[f64],
+    windows: &[usize],
+    cdf_window: Option<usize>,
+    trades: &[Trade],
+) {
     println!("loaded {trades_len} trades from {file}");
     println!();
     println!(
@@ -319,11 +356,21 @@ fn main() -> ExitCode {
     };
 
     if trades.is_empty() {
-        eprintln!("error: {} has zero trades, nothing to calibrate against", args.file);
+        eprintln!(
+            "error: {} has zero trades, nothing to calibrate against",
+            args.file
+        );
         return ExitCode::FAILURE;
     }
 
-    print_report(trades.len(), &args.file, &args.bucket_volumes, &args.windows, args.cdf_window, &trades);
+    print_report(
+        trades.len(),
+        &args.file,
+        &args.bucket_volumes,
+        &args.windows,
+        args.cdf_window,
+        &trades,
+    );
     ExitCode::SUCCESS
 }
 
@@ -333,8 +380,16 @@ mod tests {
 
     #[test]
     fn parses_valid_args() {
-        let raw = ["trades.cap", "--bucket-volumes", "10,25,50", "--windows", "20,50", "--cdf-window", "100"]
-            .map(String::from);
+        let raw = [
+            "trades.cap",
+            "--bucket-volumes",
+            "10,25,50",
+            "--windows",
+            "20,50",
+            "--cdf-window",
+            "100",
+        ]
+        .map(String::from);
         let args = parse_args(raw.into_iter()).unwrap();
         assert_eq!(args.file, "trades.cap");
         assert_eq!(args.bucket_volumes, vec![10.0, 25.0, 50.0]);
@@ -363,7 +418,14 @@ mod tests {
 
     #[test]
     fn malformed_number_in_csv_is_an_error() {
-        let raw = ["trades.cap", "--bucket-volumes", "10,abc,50", "--windows", "20"].map(String::from);
+        let raw = [
+            "trades.cap",
+            "--bucket-volumes",
+            "10,abc,50",
+            "--windows",
+            "20",
+        ]
+        .map(String::from);
         assert!(parse_args(raw.into_iter()).is_err());
     }
 
@@ -387,7 +449,7 @@ mod tests {
     #[test]
     fn mean_interval_computes_average_gap() {
         let interval = mean_interval_ms(&[0, 1_000_000, 3_000_000, 6_000_000]); // ns
-        // gaps: 1ms, 2ms, 3ms -> mean 2ms
+                                                                                // gaps: 1ms, 2ms, 3ms -> mean 2ms
         assert!((interval - 2.0).abs() < 1e-9);
     }
 
@@ -399,7 +461,12 @@ mod tests {
 
     #[test]
     fn calibrate_one_reports_invalid_config_as_error_not_panic() {
-        let trades = vec![Trade { price: 100.0, volume: 1.0, ts_ns: 0, taker_side: TakerSide::Buy }];
+        let trades = vec![Trade {
+            price: 100.0,
+            volume: 1.0,
+            ts_ns: 0,
+            taker_side: TakerSide::Buy,
+        }];
         let result = calibrate_one(&trades, -5.0, 10, None);
         assert!(result.is_err());
     }
@@ -416,15 +483,27 @@ mod tests {
         let mut price = 100.0;
         for i in 0..500u64 {
             price += if i % 2 == 0 { 0.4 } else { -0.25 };
-            let taker_side = if i % 2 == 0 { TakerSide::Buy } else { TakerSide::Sell };
-            trades.push(Trade { price, volume: 10.0, ts_ns: i * 1_000_000, taker_side });
+            let taker_side = if i % 2 == 0 {
+                TakerSide::Buy
+            } else {
+                TakerSide::Sell
+            };
+            trades.push(Trade {
+                price,
+                volume: 10.0,
+                ts_ns: i * 1_000_000,
+                taker_side,
+            });
         }
         let stats = calibrate_one(&trades, 10.0, 10, Some(20)).unwrap();
         assert!(stats.total_buckets > 0);
         assert!(stats.non_warmup_readings > 0);
         assert!(stats.vpin_mean >= 0.0 && stats.vpin_mean <= 1.0);
         assert!(!stats.avg_bucket_interval_ms.is_nan());
-        assert!(!stats.bvc_accuracy.is_nan(), "expected BVC accuracy to be computed once sigma warms up");
+        assert!(
+            !stats.bvc_accuracy.is_nan(),
+            "expected BVC accuracy to be computed once sigma warms up"
+        );
         assert!((0.0..=1.0).contains(&stats.bvc_accuracy));
         assert!(stats.bvc_mean_abs_error >= 0.0);
     }
@@ -435,7 +514,12 @@ mod tests {
         // compare, this must report NaN rather than a misleading 0% or
         // panicking on an empty average.
         let trades = (0..5u64)
-            .map(|i| Trade { price: 100.0 + i as f64, volume: 10.0, ts_ns: i, taker_side: TakerSide::Buy })
+            .map(|i| Trade {
+                price: 100.0 + i as f64,
+                volume: 10.0,
+                ts_ns: i,
+                taker_side: TakerSide::Buy,
+            })
             .collect::<Vec<_>>();
         let (accuracy, mae) = bvc_accuracy_stats(&trades, 10.0, 1000).unwrap();
         assert!(accuracy.is_nan());
@@ -461,11 +545,18 @@ mod tests {
                 price,
                 volume: 10.0,
                 ts_ns: i,
-                taker_side: if is_buy { TakerSide::Buy } else { TakerSide::Sell },
+                taker_side: if is_buy {
+                    TakerSide::Buy
+                } else {
+                    TakerSide::Sell
+                },
             });
         }
         let (accuracy, _mae) = bvc_accuracy_stats(&trades, 10.0, 20).unwrap();
         assert!(!accuracy.is_nan());
-        assert!(accuracy > 0.95, "expected near-perfect accuracy on a tape constructed to align, got {accuracy}");
+        assert!(
+            accuracy > 0.95,
+            "expected near-perfect accuracy on a tape constructed to align, got {accuracy}"
+        );
     }
 }
