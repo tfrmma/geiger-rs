@@ -78,6 +78,9 @@ pub struct ServiceConfig {
     /// a monitoring scrape can't be mistaken for (or interfere with) a
     /// subscriber handshake.
     pub health_bind_addr: String,
+    /// Kept (not just consumed into `streams`) so `main.rs` can re-read
+    /// the same file later if config hot-reload is enabled.
+    pub streams_file: String,
     pub streams: Vec<StreamConfig>,
     pub heartbeat_interval: Duration,
     /// `None` if `GEIGER_AUTH_TOKEN` isn't set, meaning no auth is
@@ -85,31 +88,54 @@ pub struct ServiceConfig {
     /// deployments, not fine for anything with a public-reachable bind
     /// address.
     pub auth_token: Option<String>,
+    /// `None` if `GEIGER_CONFIG_POLL_SECS` is unset or `0`: hot-reload
+    /// disabled, `streams_file` is only ever read once, at startup.
+    /// `Some(interval)` otherwise: `main.rs` re-reads it on this
+    /// interval and starts any new stream it finds. See
+    /// `main::config_reload_loop` for why streams that drop out of the
+    /// file are deliberately never removed.
+    pub config_poll_interval: Option<Duration>,
+}
+
+/// Reads and parses a streams file. Returns `Result` rather than
+/// panicking like the rest of this module's `from_env` path: this is
+/// also called by `main::config_reload_loop` on a running process,
+/// which needs to log a bad file and keep going, not take the whole
+/// service down over an operator's typo mid-session — the one thing
+/// that's actually fine, even correct, to do at startup instead.
+///
+/// # Errors
+/// The file can't be read, isn't valid JSON for this schema, or has
+/// zero streams in it.
+pub fn load_streams(path: &str) -> Result<Vec<StreamConfig>, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("failed to read {path}: {e}"))?;
+    let file: StreamsFile =
+        serde_json::from_str(&raw).map_err(|e| format!("failed to parse {path}: {e}"))?;
+    if file.streams.is_empty() {
+        return Err(format!(
+            "{path} has zero streams configured, nothing to run"
+        ));
+    }
+    Ok(file.streams)
 }
 
 impl ServiceConfig {
     pub fn from_env() -> Self {
         let streams_path = required("GEIGER_STREAMS_FILE");
-        let raw = std::fs::read_to_string(&streams_path)
-            .unwrap_or_else(|e| panic!("failed to read GEIGER_STREAMS_FILE ({streams_path}): {e}"));
-        let file: StreamsFile = serde_json::from_str(&raw).unwrap_or_else(|e| {
-            panic!("failed to parse GEIGER_STREAMS_FILE ({streams_path}): {e}")
-        });
+        let streams = load_streams(&streams_path).unwrap_or_else(|e| panic!("{e}"));
 
-        if file.streams.is_empty() {
-            panic!(
-                "GEIGER_STREAMS_FILE ({streams_path}) has zero streams configured, nothing to run"
-            );
-        }
+        let poll_secs = optional_u64("GEIGER_CONFIG_POLL_SECS", 0);
 
         ServiceConfig {
             bind_addr: optional_string("GEIGER_BIND_ADDR", "0.0.0.0:9700"),
             health_bind_addr: optional_string("GEIGER_HEALTH_ADDR", "0.0.0.0:9701"),
-            streams: file.streams,
+            streams_file: streams_path,
+            streams,
             heartbeat_interval: Duration::from_secs(optional_u64("GEIGER_HEARTBEAT_SECS", 5)),
             auth_token: std::env::var("GEIGER_AUTH_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            config_poll_interval: (poll_secs > 0).then(|| Duration::from_secs(poll_secs)),
         }
     }
 }
@@ -213,5 +239,51 @@ mod tests {
         let resolved = cfg.backoff_config();
         assert_eq!(resolved.base, Duration::from_millis(500));
         assert_eq!(resolved.max, BackoffConfig::default().max); // untouched field keeps the default
+    }
+
+    fn temp_streams_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("ts-config-{tag}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("streams.json")
+    }
+
+    #[test]
+    fn load_streams_reads_a_valid_file() {
+        let path = temp_streams_path("valid");
+        std::fs::write(
+            &path,
+            r#"{"streams":[{"exchange":"binance","symbol":"BTCUSDT","bucket_volume":50.0,"sigma_window":50,"vpin_window":50}]}"#,
+        )
+        .unwrap();
+
+        let streams = load_streams(path.to_str().unwrap()).unwrap();
+        assert_eq!(streams.len(), 1);
+        assert_eq!(streams[0].symbol, "BTCUSDT");
+    }
+
+    #[test]
+    fn load_streams_errors_on_missing_file() {
+        // config_reload_loop depends on this being an `Err`, not a
+        // panic: a streams file that briefly doesn't exist mid-edit
+        // (some editors write via a temp file + rename) shouldn't take
+        // the whole service down.
+        let err = load_streams("/nonexistent/path/does-not-exist.json").unwrap_err();
+        assert!(err.contains("failed to read"));
+    }
+
+    #[test]
+    fn load_streams_errors_on_invalid_json() {
+        let path = temp_streams_path("bad-json");
+        std::fs::write(&path, "not valid json at all").unwrap();
+        let err = load_streams(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("failed to parse"));
+    }
+
+    #[test]
+    fn load_streams_errors_on_zero_streams() {
+        let path = temp_streams_path("empty");
+        std::fs::write(&path, r#"{"streams":[]}"#).unwrap();
+        let err = load_streams(path.to_str().unwrap()).unwrap_err();
+        assert!(err.contains("zero streams"));
     }
 }
