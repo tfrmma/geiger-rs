@@ -12,7 +12,7 @@ use crate::IngestError;
 #[repr(u8)]
 pub enum TakerSide {
     #[default]
-    Buy  = 0,
+    Buy = 0,
     Sell = 1,
 }
 
@@ -77,8 +77,12 @@ pub fn parse_fixed8(s: &str) -> Result<u64, IngestError> {
         return Err(IngestError::BadDecimal(s.to_string()));
     }
 
-    let int_val: u64 = int_part.parse().map_err(|_| IngestError::BadDecimal(s.to_string()))?;
-    let int_val = int_val.checked_mul(SCALE).ok_or_else(|| IngestError::BadDecimal(s.to_string()))?;
+    let int_val: u64 = int_part
+        .parse()
+        .map_err(|_| IngestError::BadDecimal(s.to_string()))?;
+    let int_val = int_val
+        .checked_mul(SCALE)
+        .ok_or_else(|| IngestError::BadDecimal(s.to_string()))?;
 
     if frac_part.is_empty() {
         return Ok(int_val);
@@ -86,9 +90,13 @@ pub fn parse_fixed8(s: &str) -> Result<u64, IngestError> {
 
     let mut padded = frac_part.to_string();
     padded.push_str(&"0".repeat(8 - frac_part.len()));
-    let frac_val: u64 = padded.parse().map_err(|_| IngestError::BadDecimal(s.to_string()))?;
+    let frac_val: u64 = padded
+        .parse()
+        .map_err(|_| IngestError::BadDecimal(s.to_string()))?;
 
-    int_val.checked_add(frac_val).ok_or_else(|| IngestError::BadDecimal(s.to_string()))
+    int_val
+        .checked_add(frac_val)
+        .ok_or_else(|| IngestError::BadDecimal(s.to_string()))
 }
 
 pub fn parse_price(s: &str) -> Result<Price, IngestError> {
