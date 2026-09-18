@@ -27,9 +27,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use feedhandler::{Exchange, Symbol};
 
-use backoff::{BackoffConfig, ExponentialBackoff};
 use crate::types::{parse_price, parse_qty, NormalizedTrade, TakerSide};
 use crate::IngestError;
+use backoff::{BackoffConfig, ExponentialBackoff};
 
 const URL: &str = "wss://stream.bybit.com/v5/public/linear";
 const APP_PING_INTERVAL: Duration = Duration::from_secs(15); // Bybit asks for <=20s
@@ -54,7 +54,11 @@ struct BybitTrade {
 }
 
 /// See `binance::run`'s doc comment for why this takes an owned `String`.
-pub async fn run(symbol: String, tx: mpsc::UnboundedSender<NormalizedTrade>, backoff_cfg: BackoffConfig) {
+pub async fn run(
+    symbol: String,
+    tx: mpsc::UnboundedSender<NormalizedTrade>,
+    backoff_cfg: BackoffConfig,
+) {
     let normalized_symbol = Symbol::from_bytes(symbol.as_bytes());
     let mut backoff = backoff_cfg.build();
     let mut sequence: u64 = 0;
@@ -62,7 +66,9 @@ pub async fn run(symbol: String, tx: mpsc::UnboundedSender<NormalizedTrade>, bac
     loop {
         match run_once(&symbol, normalized_symbol, &tx, &mut sequence, &mut backoff).await {
             Ok(()) => tracing::warn!(venue = "bybit", symbol, "session closed, reconnecting"),
-            Err(e) => tracing::warn!(venue = "bybit", symbol, error = %e, "session error, reconnecting"),
+            Err(e) => {
+                tracing::warn!(venue = "bybit", symbol, error = %e, "session error, reconnecting")
+            }
         }
         tokio::time::sleep(backoff.next_delay()).await;
     }
@@ -119,7 +125,11 @@ async fn run_once(
 /// data pushes on the same connection, distinguished by the presence of
 /// a `"topic"` field. Anything without one is a control message, ignored
 /// here rather than treated as an error, it's expected traffic.
-fn decode(text: &str, symbol: Symbol, sequence: &mut u64) -> Result<Vec<NormalizedTrade>, IngestError> {
+fn decode(
+    text: &str,
+    symbol: Symbol,
+    sequence: &mut u64,
+) -> Result<Vec<NormalizedTrade>, IngestError> {
     let value: Value = serde_json::from_str(text)?;
     if value.get("topic").is_none() {
         return Ok(Vec::new());
