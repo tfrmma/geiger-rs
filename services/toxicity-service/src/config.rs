@@ -17,7 +17,10 @@ fn optional_string(name: &str, default: &str) -> String {
 }
 
 fn optional_u64(name: &str, default: u64) -> u64 {
-    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    std::env::var(name)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 /// One (exchange, symbol) pair to track, and the VPIN parameters for it.
@@ -51,8 +54,14 @@ impl StreamConfig {
     pub fn backoff_config(&self) -> BackoffConfig {
         let default = BackoffConfig::default();
         BackoffConfig {
-            base: self.backoff_base_ms.map(Duration::from_millis).unwrap_or(default.base),
-            max: self.backoff_max_secs.map(Duration::from_secs).unwrap_or(default.max),
+            base: self
+                .backoff_base_ms
+                .map(Duration::from_millis)
+                .unwrap_or(default.base),
+            max: self
+                .backoff_max_secs
+                .map(Duration::from_secs)
+                .unwrap_or(default.max),
         }
     }
 }
@@ -64,6 +73,11 @@ struct StreamsFile {
 
 pub struct ServiceConfig {
     pub bind_addr: String,
+    /// Separate port from `bind_addr`: `/health` and `/metrics` are
+    /// plain HTTP, not WebSocket, and keeping them off the WS port means
+    /// a monitoring scrape can't be mistaken for (or interfere with) a
+    /// subscriber handshake.
+    pub health_bind_addr: String,
     pub streams: Vec<StreamConfig>,
     pub heartbeat_interval: Duration,
     /// `None` if `GEIGER_AUTH_TOKEN` isn't set, meaning no auth is
@@ -78,18 +92,24 @@ impl ServiceConfig {
         let streams_path = required("GEIGER_STREAMS_FILE");
         let raw = std::fs::read_to_string(&streams_path)
             .unwrap_or_else(|e| panic!("failed to read GEIGER_STREAMS_FILE ({streams_path}): {e}"));
-        let file: StreamsFile = serde_json::from_str(&raw)
-            .unwrap_or_else(|e| panic!("failed to parse GEIGER_STREAMS_FILE ({streams_path}): {e}"));
+        let file: StreamsFile = serde_json::from_str(&raw).unwrap_or_else(|e| {
+            panic!("failed to parse GEIGER_STREAMS_FILE ({streams_path}): {e}")
+        });
 
         if file.streams.is_empty() {
-            panic!("GEIGER_STREAMS_FILE ({streams_path}) has zero streams configured, nothing to run");
+            panic!(
+                "GEIGER_STREAMS_FILE ({streams_path}) has zero streams configured, nothing to run"
+            );
         }
 
         ServiceConfig {
             bind_addr: optional_string("GEIGER_BIND_ADDR", "0.0.0.0:9700"),
+            health_bind_addr: optional_string("GEIGER_HEALTH_ADDR", "0.0.0.0:9701"),
             streams: file.streams,
             heartbeat_interval: Duration::from_secs(optional_u64("GEIGER_HEARTBEAT_SECS", 5)),
-            auth_token: std::env::var("GEIGER_AUTH_TOKEN").ok().filter(|s| !s.is_empty()),
+            auth_token: std::env::var("GEIGER_AUTH_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
         }
     }
 }
@@ -110,7 +130,11 @@ pub fn parse_exchange(s: &str) -> Option<feedhandler::Exchange> {
 /// for wiring up subscriptions, not on any hot path, a string compare
 /// isn't worth avoiding here.
 pub fn stream_key(exchange: &str, symbol: &str) -> String {
-    format!("{}:{}", exchange.to_ascii_lowercase(), symbol.to_ascii_uppercase())
+    format!(
+        "{}:{}",
+        exchange.to_ascii_lowercase(),
+        symbol.to_ascii_uppercase()
+    )
 }
 
 #[cfg(test)]
@@ -119,9 +143,15 @@ mod tests {
 
     #[test]
     fn parses_known_exchanges_case_insensitively() {
-        assert_eq!(parse_exchange("Binance"), Some(feedhandler::Exchange::Binance));
+        assert_eq!(
+            parse_exchange("Binance"),
+            Some(feedhandler::Exchange::Binance)
+        );
         assert_eq!(parse_exchange("BYBIT"), Some(feedhandler::Exchange::Bybit));
-        assert_eq!(parse_exchange("hyperliquid"), Some(feedhandler::Exchange::Hyperliquid));
+        assert_eq!(
+            parse_exchange("hyperliquid"),
+            Some(feedhandler::Exchange::Hyperliquid)
+        );
     }
 
     #[test]
