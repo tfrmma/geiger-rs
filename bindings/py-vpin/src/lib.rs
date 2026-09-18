@@ -86,8 +86,18 @@ struct PyVpinEngine {
 impl PyVpinEngine {
     #[new]
     #[pyo3(signature = (bucket_volume, sigma_window, vpin_window, cdf_window=None))]
-    fn new(bucket_volume: f64, sigma_window: usize, vpin_window: usize, cdf_window: Option<usize>) -> PyResult<Self> {
-        let cfg = VpinEngineConfig { bucket_volume, sigma_window, vpin_window, cdf_window };
+    fn new(
+        bucket_volume: f64,
+        sigma_window: usize,
+        vpin_window: usize,
+        cdf_window: Option<usize>,
+    ) -> PyResult<Self> {
+        let cfg = VpinEngineConfig {
+            bucket_volume,
+            sigma_window,
+            vpin_window,
+            cdf_window,
+        };
         let inner = VpinEngine::new(cfg).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyVpinEngine { inner })
     }
@@ -95,7 +105,9 @@ impl PyVpinEngine {
     /// Feed one trade in. Returns a `VpinReading` if this trade closes a
     /// bucket, `None` otherwise (most calls, a bucket is many trades).
     fn push_trade(&mut self, price: f64, volume: f64, ts_ns: u64) -> Option<PyVpinReading> {
-        self.inner.push_trade(price, volume, ts_ns).map(PyVpinReading::from)
+        self.inner
+            .push_trade(price, volume, ts_ns)
+            .map(PyVpinReading::from)
     }
 }
 
@@ -144,13 +156,31 @@ mod tests {
 
     #[test]
     fn repr_handles_none_fields_without_panicking() {
-        let reading = PyVpinReading { bucket_id: 0, ts_close_ns: 0, trades_in_bucket: 3, vpin: None, vpin_cdf: None };
-        assert_eq!(reading.__repr__(), "VpinReading(bucket_id=0, trades_in_bucket=3, vpin=None, vpin_cdf=None)");
+        let reading = PyVpinReading {
+            bucket_id: 0,
+            ts_close_ns: 0,
+            trades_in_bucket: 3,
+            vpin: None,
+            vpin_cdf: None,
+        };
+        assert_eq!(
+            reading.__repr__(),
+            "VpinReading(bucket_id=0, trades_in_bucket=3, vpin=None, vpin_cdf=None)"
+        );
     }
 
     #[test]
     fn repr_formats_some_values_as_numbers_not_debug_syntax() {
-        let reading = PyVpinReading { bucket_id: 1, ts_close_ns: 0, trades_in_bucket: 3, vpin: Some(0.42), vpin_cdf: Some(0.9) };
-        assert_eq!(reading.__repr__(), "VpinReading(bucket_id=1, trades_in_bucket=3, vpin=0.42, vpin_cdf=0.9)");
+        let reading = PyVpinReading {
+            bucket_id: 1,
+            ts_close_ns: 0,
+            trades_in_bucket: 3,
+            vpin: Some(0.42),
+            vpin_cdf: Some(0.9),
+        };
+        assert_eq!(
+            reading.__repr__(),
+            "VpinReading(bucket_id=1, trades_in_bucket=3, vpin=0.42, vpin_cdf=0.9)"
+        );
     }
 }
