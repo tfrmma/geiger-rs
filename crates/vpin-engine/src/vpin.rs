@@ -24,9 +24,16 @@ pub struct RollingSigma {
 impl RollingSigma {
     pub fn new(window: usize) -> Result<Self, VpinError> {
         if window < 2 {
-            return Err(VpinError::InvalidWindow { got: window, min: 2 });
+            return Err(VpinError::InvalidWindow {
+                got: window,
+                min: 2,
+            });
         }
-        Ok(RollingSigma { window, buf: VecDeque::with_capacity(window), current: None })
+        Ok(RollingSigma {
+            window,
+            buf: VecDeque::with_capacity(window),
+            current: None,
+        })
     }
 
     /// Estimate from buckets seen so far, `None` until the window fills.
@@ -47,7 +54,8 @@ impl RollingSigma {
             None
         } else {
             let mean = self.buf.iter().sum::<f64>() / self.window as f64;
-            let var = self.buf.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (self.window - 1) as f64;
+            let var =
+                self.buf.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / (self.window - 1) as f64;
             Some(var.sqrt())
         };
         self.current
@@ -68,9 +76,15 @@ pub struct EmpiricalCdf {
 impl EmpiricalCdf {
     pub fn new(window: usize) -> Result<Self, VpinError> {
         if window < 2 {
-            return Err(VpinError::InvalidWindow { got: window, min: 2 });
+            return Err(VpinError::InvalidWindow {
+                got: window,
+                min: 2,
+            });
         }
-        Ok(EmpiricalCdf { window, buf: VecDeque::with_capacity(window) })
+        Ok(EmpiricalCdf {
+            window,
+            buf: VecDeque::with_capacity(window),
+        })
     }
 
     /// Pushes `value` in, returns its rank as a fraction in `[0, 1]` of
@@ -153,7 +167,10 @@ pub struct VpinEngine {
 impl VpinEngine {
     pub fn new(cfg: VpinEngineConfig) -> Result<Self, VpinError> {
         if cfg.vpin_window < 1 {
-            return Err(VpinError::InvalidWindow { got: cfg.vpin_window, min: 1 });
+            return Err(VpinError::InvalidWindow {
+                got: cfg.vpin_window,
+                min: 1,
+            });
         }
         Ok(VpinEngine {
             bucketer: VolumeBucketer::new(cfg.bucket_volume)?,
@@ -296,7 +313,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_a_value, "expected at least one non-warmup VPIN reading over 200 trades");
+        assert!(
+            saw_a_value,
+            "expected at least one non-warmup VPIN reading over 200 trades"
+        );
     }
 
     proptest::proptest! {
