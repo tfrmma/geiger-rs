@@ -135,7 +135,7 @@ async fn run_once(
         symbol: symbol.to_string(),
     };
     write
-        .send(Message::Text(serde_json::to_string(&sub)?))
+        .send(Message::Text(serde_json::to_string(&sub)?.into()))
         .await?;
 
     // Checked at twice the staleness threshold's frequency so the
@@ -254,7 +254,7 @@ mod tests {
 
             while let Some(msg) = to_send.recv().await {
                 let text = serde_json::to_string(&msg).unwrap();
-                if write.send(Message::Text(text)).await.is_err() {
+                if write.send(Message::Text(text.into())).await.is_err() {
                     break;
                 }
             }
