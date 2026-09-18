@@ -36,9 +36,9 @@ pub struct StreamEntry {
     pub exchange: String,
     pub symbol: String,
     pub sender: broadcast::Sender<ServerMessage>,
-    /// Most recent message sent on `sender`. Not read yet (catch-up on
-    /// subscribe is a separate piece of work), populated now so that
-    /// piece doesn't also need a `worker.rs` change when it lands.
+    /// Most recent message sent on `sender`. Read on subscribe (see
+    /// `server.rs`) to catch a client up immediately instead of leaving
+    /// it waiting for the next bucket close or heartbeat.
     pub last_message: RwLock<Option<ServerMessage>>,
     pub health: RwLock<StreamHealth>,
 }
