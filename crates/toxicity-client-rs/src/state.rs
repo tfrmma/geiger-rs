@@ -20,7 +20,11 @@ pub enum ToxicityState {
     Warming { trades_in_bucket: u32 },
     /// A real reading. `vpin_cdf` can still be `None` even here, the CDF
     /// transform has its own, possibly different, warmup window.
-    Live { vpin: f64, vpin_cdf: Option<f64>, trades_in_bucket: u32 },
+    Live {
+        vpin: f64,
+        vpin_cdf: Option<f64>,
+        trades_in_bucket: u32,
+    },
     /// No message (`Reading` or `Heartbeat`) within the configured
     /// staleness threshold. Could be a dead connection, a dead
     /// `toxicity-service`, or a network partition, this client can't
@@ -52,8 +56,16 @@ mod tests {
 
     #[test]
     fn is_live_only_true_for_live() {
-        assert!(ToxicityState::Live { vpin: 0.1, vpin_cdf: None, trades_in_bucket: 5 }.is_live());
-        assert!(!ToxicityState::Warming { trades_in_bucket: 0 }.is_live());
+        assert!(ToxicityState::Live {
+            vpin: 0.1,
+            vpin_cdf: None,
+            trades_in_bucket: 5
+        }
+        .is_live());
+        assert!(!ToxicityState::Warming {
+            trades_in_bucket: 0
+        }
+        .is_live());
         assert!(!ToxicityState::Connecting.is_live());
         assert!(!ToxicityState::Stale.is_live());
     }
@@ -62,6 +74,9 @@ mod tests {
     fn is_stale_only_true_for_stale_not_connecting() {
         assert!(ToxicityState::Stale.is_stale());
         assert!(!ToxicityState::Connecting.is_stale());
-        assert!(!ToxicityState::Warming { trades_in_bucket: 0 }.is_stale());
+        assert!(!ToxicityState::Warming {
+            trades_in_bucket: 0
+        }
+        .is_stale());
     }
 }
