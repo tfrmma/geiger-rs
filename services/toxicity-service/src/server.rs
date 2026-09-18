@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -10,10 +9,9 @@ use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::config::stream_key;
+use crate::registry::Registry;
 use crate::ServiceError;
 use toxicity_service::protocol::{ServerMessage, SubscribeRequest};
-
-pub type Registry = Arc<HashMap<String, broadcast::Sender<ServerMessage>>>;
 
 /// `None` means no auth is enforced, anyone who can reach the port can
 /// subscribe. Fine for pure localhost/VPN deployments, not fine for
@@ -21,10 +19,12 @@ pub type Registry = Arc<HashMap<String, broadcast::Sender<ServerMessage>>>;
 /// in that case.
 pub type AuthToken = Option<Arc<str>>;
 
-/// Accepts connections forever, until `shutdown` fires. The set of
-/// streams is fixed at startup (config-driven, see `config.rs`), so
-/// `Registry` is a plain `Arc`, no lock, there's nothing to mutate after
-/// construction.
+/// Accepts connections forever, until `shutdown` fires. `Registry` is an
+/// `Arc<RwLock<HashMap<...>>>` rather than a plain `Arc<HashMap<...>>`:
+/// the set of streams is still fixed at startup as far as this function
+/// is concerned, the lock is there for config hot-reload (future work)
+/// to insert into it later without every subscriber needing a new
+/// `Registry` handed to it.
 ///
 /// On shutdown this stops accepting new connections and returns
 /// promptly, it does not wait for existing subscribers to disconnect
@@ -32,9 +32,18 @@ pub type AuthToken = Option<Arc<str>>;
 /// client if one exists) is already built to reconnect on its own, a
 /// hard disconnect here is a normal, expected condition for them, not a
 /// failure to design around.
-pub async fn run(bind_addr: &str, registry: Registry, auth_token: AuthToken, mut shutdown: watch::Receiver<bool>) -> Result<(), ServiceError> {
+pub async fn run(
+    bind_addr: &str,
+    registry: Registry,
+    auth_token: AuthToken,
+    mut shutdown: watch::Receiver<bool>,
+) -> Result<(), ServiceError> {
     let listener = TcpListener::bind(bind_addr).await?;
-    tracing::info!(bind_addr, auth_enabled = auth_token.is_some(), "toxicity-service listening");
+    tracing::info!(
+        bind_addr,
+        auth_enabled = auth_token.is_some(),
+        "toxicity-service listening"
+    );
 
     loop {
         tokio::select! {
@@ -62,7 +71,9 @@ pub async fn run(bind_addr: &str, registry: Registry, auth_token: AuthToken, mut
 /// never gets a completed WS connection at all, not even a "here's an
 /// error message" one.
 fn check_auth(req: &Request, auth_token: &AuthToken) -> Result<(), ErrorResponse> {
-    let Some(expected) = auth_token else { return Ok(()) }; // auth disabled
+    let Some(expected) = auth_token else {
+        return Ok(());
+    }; // auth disabled
 
     let provided = req
         .headers()
@@ -79,9 +90,20 @@ fn check_auth(req: &Request, auth_token: &AuthToken) -> Result<(), ErrorResponse
     // inside tungstenite (github.com/snapview/tokio-tungstenite/issues/205),
     // this is the pattern actually used in the wild to reject a handshake
     // cleanly.
-    let body = if provided.is_none() { "missing bearer token" } else { "invalid bearer token" };
-    let status = if provided.is_none() { StatusCode::UNAUTHORIZED } else { StatusCode::FORBIDDEN };
-    let response = Response::builder().status(status).body(Some(body.to_string())).expect("valid static response");
+    let body = if provided.is_none() {
+        "missing bearer token"
+    } else {
+        "invalid bearer token"
+    };
+    let status = if provided.is_none() {
+        StatusCode::UNAUTHORIZED
+    } else {
+        StatusCode::FORBIDDEN
+    };
+    let response = Response::builder()
+        .status(status)
+        .body(Some(body.to_string()))
+        .expect("valid static response");
     Err(response)
 }
 
@@ -91,15 +113,18 @@ async fn handle_connection(
     registry: Registry,
     auth_token: AuthToken,
 ) -> Result<(), ServiceError> {
-    let ws = tokio_tungstenite::accept_hdr_async(stream, |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
-        match check_auth(req, &auth_token) {
-            Ok(()) => Ok(res),
-            Err(rejection) => {
-                tracing::warn!(%peer, "rejected unauthorized connection attempt");
-                Err(rejection)
+    let ws = tokio_tungstenite::accept_hdr_async(
+        stream,
+        |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
+            match check_auth(req, &auth_token) {
+                Ok(()) => Ok(res),
+                Err(rejection) => {
+                    tracing::warn!(%peer, "rejected unauthorized connection attempt");
+                    Err(rejection)
+                }
             }
-        }
-    })
+        },
+    )
     .await?;
     let (mut write, mut read) = ws.split();
 
@@ -109,12 +134,17 @@ async fn handle_connection(
     };
 
     let key = stream_key(&sub.exchange, &sub.symbol);
-    let Some(sender) = registry.get(&key) else {
-        let err = ServerMessage::Error { message: format!("unknown stream: {key}") };
-        write.send(Message::Text(serde_json::to_string(&err)?)).await?;
+    let entry = registry.read().await.get(&key).cloned();
+    let Some(entry) = entry else {
+        let err = ServerMessage::Error {
+            message: format!("unknown stream: {key}"),
+        };
+        write
+            .send(Message::Text(serde_json::to_string(&err)?))
+            .await?;
         return Err(ServiceError::UnknownStream(key));
     };
-    let mut sub_rx = sender.subscribe();
+    let mut sub_rx = entry.sender.subscribe();
     tracing::info!(%peer, key, "subscribed");
 
     loop {
@@ -150,6 +180,9 @@ async fn handle_connection(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::StreamEntry;
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
     use tokio_tungstenite::connect_async;
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
@@ -157,12 +190,17 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         drop(listener); // release the port, run() below rebinds it, small
-                         // race in theory, fine for a local test server
+                        // race in theory, fine for a local test server
 
         let mut map = HashMap::new();
         let (tx, _rx) = broadcast::channel(64);
-        map.insert(stream_key("binance", "BTCUSDT"), tx.clone());
-        let registry: Registry = Arc::new(map);
+        let entry = Arc::new(StreamEntry::new(
+            "binance".to_string(),
+            "BTCUSDT".to_string(),
+            tx,
+        ));
+        map.insert(stream_key("binance", "BTCUSDT"), entry);
+        let registry: Registry = Arc::new(RwLock::new(map));
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let addr_string = addr.to_string();
@@ -181,13 +219,21 @@ mod tests {
         let (addr, registry, _shutdown_tx) = spawn_test_server(None).await;
 
         let (mut ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
-        ws.send(Message::Text(r#"{"exchange":"binance","symbol":"BTCUSDT"}"#.to_string()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            r#"{"exchange":"binance","symbol":"BTCUSDT"}"#.to_string(),
+        ))
+        .await
+        .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(30)).await;
 
-        let sender = registry.get(&stream_key("binance", "BTCUSDT")).unwrap();
+        let sender = {
+            let map = registry.read().await;
+            map.get(&stream_key("binance", "BTCUSDT"))
+                .unwrap()
+                .sender
+                .clone()
+        };
         let msg = ServerMessage::Reading {
             exchange: "binance".into(),
             symbol: "BTCUSDT".into(),
@@ -205,7 +251,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let Message::Text(text) = received else { panic!("expected a text frame") };
+        let Message::Text(text) = received else {
+            panic!("expected a text frame")
+        };
         let decoded: ServerMessage = serde_json::from_str(&text).unwrap();
         assert_eq!(decoded, msg);
     }
@@ -215,9 +263,11 @@ mod tests {
         let (addr, _registry, _shutdown_tx) = spawn_test_server(None).await;
 
         let (mut ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
-        ws.send(Message::Text(r#"{"exchange":"binance","symbol":"DOGEUSDT"}"#.to_string()))
-            .await
-            .unwrap();
+        ws.send(Message::Text(
+            r#"{"exchange":"binance","symbol":"DOGEUSDT"}"#.to_string(),
+        ))
+        .await
+        .unwrap();
 
         let received = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
             .await
@@ -225,7 +275,9 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        let Message::Text(text) = received else { panic!("expected a text frame") };
+        let Message::Text(text) = received else {
+            panic!("expected a text frame")
+        };
         let decoded: ServerMessage = serde_json::from_str(&text).unwrap();
         assert!(matches!(decoded, ServerMessage::Error { .. }));
     }
@@ -242,25 +294,33 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_connection_with_missing_bearer_token() {
-        let (addr, _registry, _shutdown_tx) = spawn_test_server(Some(Arc::from("secret-token"))).await;
+        let (addr, _registry, _shutdown_tx) =
+            spawn_test_server(Some(Arc::from("secret-token"))).await;
         let result = connect_async(format!("ws://{addr}/")).await;
-        assert!(result.is_err(), "expected the handshake itself to fail, not just the subscribe to be refused later");
+        assert!(
+            result.is_err(),
+            "expected the handshake itself to fail, not just the subscribe to be refused later"
+        );
     }
 
     #[tokio::test]
     async fn rejects_connection_with_wrong_bearer_token() {
-        let (addr, _registry, _shutdown_tx) = spawn_test_server(Some(Arc::from("secret-token"))).await;
+        let (addr, _registry, _shutdown_tx) =
+            spawn_test_server(Some(Arc::from("secret-token"))).await;
         let mut req = format!("ws://{addr}/").into_client_request().unwrap();
-        req.headers_mut().insert("Authorization", "Bearer wrong-token".parse().unwrap());
+        req.headers_mut()
+            .insert("Authorization", "Bearer wrong-token".parse().unwrap());
         let result = connect_async(req).await;
         assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn accepts_connection_with_correct_bearer_token() {
-        let (addr, _registry, _shutdown_tx) = spawn_test_server(Some(Arc::from("secret-token"))).await;
+        let (addr, _registry, _shutdown_tx) =
+            spawn_test_server(Some(Arc::from("secret-token"))).await;
         let mut req = format!("ws://{addr}/").into_client_request().unwrap();
-        req.headers_mut().insert("Authorization", "Bearer secret-token".parse().unwrap());
+        req.headers_mut()
+            .insert("Authorization", "Bearer secret-token".parse().unwrap());
         let result = connect_async(req).await;
         assert!(result.is_ok());
     }
@@ -279,6 +339,9 @@ mod tests {
         // the listening socket itself is gone once run() returns, so a
         // fresh connection attempt has to fail, not just get ignored
         let after = connect_async(format!("ws://{addr}/")).await;
-        assert!(after.is_err(), "expected connect to fail once the server has shut down");
+        assert!(
+            after.is_err(),
+            "expected connect to fail once the server has shut down"
+        );
     }
 }
