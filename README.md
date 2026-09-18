@@ -109,8 +109,9 @@ comes from a JSON file:
 
 ```bash
 export GEIGER_STREAMS_FILE=services/toxicity-service/streams.example.json
-export GEIGER_BIND_ADDR=0.0.0.0:9700   # default shown
-export GEIGER_HEARTBEAT_SECS=5          # default shown
+export GEIGER_BIND_ADDR=0.0.0.0:9700         # default shown
+export GEIGER_HEALTH_ADDR=0.0.0.0:9701       # default shown, see "Operational notes"
+export GEIGER_HEARTBEAT_SECS=5               # default shown
 export GEIGER_AUTH_TOKEN=some-shared-secret  # optional, unset = no auth
 cargo run -p toxicity-service
 ```
@@ -118,6 +119,22 @@ cargo run -p toxicity-service
 The values in `streams.example.json` are illustrative placeholders, not
 a calibration. `bucket_volume` in particular is instrument-specific, run
 `tools/calibrate` against real captured data before using this live.
+
+### Health and metrics
+
+`GEIGER_HEALTH_ADDR` (default `0.0.0.0:9701`) is a separate plain-HTTP
+port from the WS endpoint, two routes, no framework:
+
+```bash
+curl http://127.0.0.1:9701/health    # JSON: per-stream trade/reading counts, alive flag
+curl http://127.0.0.1:9701/metrics   # Prometheus exposition format
+```
+
+`/health`'s `alive` flag reflects whether that stream's worker is still
+running, `false` means its trade-ingest channel closed, which given
+trade-ingest's own reconnect-forever loop should only happen during
+shutdown. `/metrics` exposes the same counters as `geiger_*` Prometheus
+samples, see `health.rs` for the full metric list.
 
 ### Consuming from Rust
 
