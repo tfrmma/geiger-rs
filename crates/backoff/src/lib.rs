@@ -32,7 +32,10 @@ impl BackoffConfig {
 
 impl Default for BackoffConfig {
     fn default() -> Self {
-        BackoffConfig { base: Duration::from_millis(250), max: Duration::from_secs(30) }
+        BackoffConfig {
+            base: Duration::from_millis(250),
+            max: Duration::from_secs(30),
+        }
     }
 }
 
@@ -48,7 +51,11 @@ pub struct ExponentialBackoff {
 
 impl ExponentialBackoff {
     pub fn new(base: Duration, max: Duration) -> Self {
-        ExponentialBackoff { attempt: 0, base, max }
+        ExponentialBackoff {
+            attempt: 0,
+            base,
+            max,
+        }
     }
 
     pub fn reset(&mut self) {
@@ -84,7 +91,11 @@ mod tests {
 
     #[test]
     fn backoff_config_build_produces_a_working_backoff() {
-        let mut b = BackoffConfig { base: Duration::from_millis(10), max: Duration::from_millis(40) }.build();
+        let mut b = BackoffConfig {
+            base: Duration::from_millis(10),
+            max: Duration::from_millis(40),
+        }
+        .build();
         assert_eq!(b.next_delay(), Duration::from_millis(10));
         assert_eq!(b.next_delay(), Duration::from_millis(20));
         assert_eq!(b.next_delay(), Duration::from_millis(40));
