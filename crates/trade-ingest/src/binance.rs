@@ -23,9 +23,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use feedhandler::{Exchange, Symbol};
 
-use backoff::{BackoffConfig, ExponentialBackoff};
 use crate::types::{parse_price, parse_qty, NormalizedTrade, TakerSide};
 use crate::IngestError;
+use backoff::{BackoffConfig, ExponentialBackoff};
 
 const BASE_URL: &str = "wss://fstream.binance.com/market/stream";
 
@@ -61,7 +61,11 @@ fn build_url(symbol_lower: &str) -> String {
 /// Takes an owned `String` rather than `&str`: this gets moved into a
 /// `tokio::spawn`'d task by every caller we have, which needs `'static`,
 /// a borrow from a caller's loop-local config can't satisfy that.
-pub async fn run(symbol: String, tx: mpsc::UnboundedSender<NormalizedTrade>, backoff_cfg: BackoffConfig) {
+pub async fn run(
+    symbol: String,
+    tx: mpsc::UnboundedSender<NormalizedTrade>,
+    backoff_cfg: BackoffConfig,
+) {
     let symbol_lower = symbol.to_ascii_lowercase();
     let normalized_symbol = Symbol::from_bytes(symbol.to_ascii_uppercase().as_bytes());
     let url = build_url(&symbol_lower);
@@ -145,7 +149,11 @@ fn decode(text: &str, symbol: Symbol, sequence: &mut u64) -> Result<NormalizedTr
         ts_recv_ns: feedhandler::timer::now_ns(),
         symbol,
         exchange: Exchange::Binance,
-        taker_side: if trade.buyer_is_maker { TakerSide::Sell } else { TakerSide::Buy },
+        taker_side: if trade.buyer_is_maker {
+            TakerSide::Sell
+        } else {
+            TakerSide::Buy
+        },
         sequence: seq,
     })
 }
@@ -208,7 +216,10 @@ mod tests {
     #[test]
     fn url_is_lowercased_and_market_routed() {
         let url = build_url("bnbusdt");
-        assert_eq!(url, "wss://fstream.binance.com/market/stream?streams=bnbusdt@aggTrade");
+        assert_eq!(
+            url,
+            "wss://fstream.binance.com/market/stream?streams=bnbusdt@aggTrade"
+        );
     }
 
     #[test]
