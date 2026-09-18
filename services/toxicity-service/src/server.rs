@@ -145,6 +145,19 @@ async fn handle_connection(
         return Err(ServiceError::UnknownStream(key));
     };
     let mut sub_rx = entry.sender.subscribe();
+    // Subscribing before reading the snapshot, not after: a message
+    // published in the gap between the two is then guaranteed to land
+    // in `sub_rx` even though it's also reflected in the snapshot below,
+    // so a client can at worst see one harmless duplicate right after
+    // connecting. Reading the snapshot first would risk the opposite —
+    // a message published in that same gap wouldn't be in the (already
+    // read) snapshot and wouldn't be caught by a subscribe that hasn't
+    // happened yet either, a silent gap instead of a harmless repeat.
+    if let Some(snapshot) = entry.last_message.read().await.clone() {
+        write
+            .send(Message::Text(serde_json::to_string(&snapshot)?))
+            .await?;
+    }
     tracing::info!(%peer, key, "subscribed");
 
     loop {
@@ -256,6 +269,48 @@ mod tests {
         };
         let decoded: ServerMessage = serde_json::from_str(&text).unwrap();
         assert_eq!(decoded, msg);
+    }
+
+    #[tokio::test]
+    async fn catches_up_new_subscriber_with_last_message() {
+        let (addr, registry, _shutdown_tx) = spawn_test_server(None).await;
+
+        let snapshot = ServerMessage::Reading {
+            exchange: "binance".into(),
+            symbol: "BTCUSDT".into(),
+            bucket_id: 7,
+            ts_close_ns: 999,
+            trades_in_bucket: 3,
+            vpin: Some(0.42),
+            vpin_cdf: None,
+        };
+        {
+            let map = registry.read().await;
+            let entry = map.get(&stream_key("binance", "BTCUSDT")).unwrap();
+            *entry.last_message.write().await = Some(snapshot.clone());
+        }
+
+        let (mut ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
+        ws.send(Message::Text(
+            r#"{"exchange":"binance","symbol":"BTCUSDT"}"#.to_string(),
+        ))
+        .await
+        .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timed out waiting for catch-up message")
+            .unwrap()
+            .unwrap();
+
+        let Message::Text(text) = received else {
+            panic!("expected a text frame")
+        };
+        let decoded: ServerMessage = serde_json::from_str(&text).unwrap();
+        assert_eq!(
+            decoded, snapshot,
+            "first message after subscribing should be the catch-up snapshot, not a wait for the next live one"
+        );
     }
 
     #[tokio::test]
