@@ -40,7 +40,7 @@ fn standard_normal_cdf(x: f64) -> f64 {
 /// a made-up value, this comes up during startup before enough buckets
 /// exist to estimate sigma, see `RollingSigma` in `vpin.rs`.
 pub fn buy_fraction(delta_p: f64, sigma: f64) -> Option<f64> {
-    if !(sigma.is_finite() && sigma > 0.0) || !delta_p.is_finite() {
+    if !(sigma.is_finite() && sigma > 0.0 && delta_p.is_finite()) {
         return None;
     }
     Some(standard_normal_cdf(delta_p / sigma))
@@ -83,7 +83,10 @@ mod tests {
         for delta_p in [-5.0, -1.0, -0.01, 0.0, 0.01, 1.0, 5.0] {
             for sigma in [0.001, 0.5, 1.0, 3.7] {
                 let (buy, sell) = classify(delta_p, sigma, 1234.5).unwrap();
-                assert!((buy + sell - 1234.5).abs() < 1e-6, "delta_p={delta_p} sigma={sigma}");
+                assert!(
+                    (buy + sell - 1234.5).abs() < 1e-6,
+                    "delta_p={delta_p} sigma={sigma}"
+                );
             }
         }
     }
