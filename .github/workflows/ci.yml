@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: build + test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      # py-vpin's [lib] crate-type includes "rlib" (not just "cdylib") so
+      # `cargo test` can exercise the #[pymethods] impls directly without
+      # a built wheel, see bindings/py-vpin/Cargo.toml. That rlib links
+      # against libpython, which needs the headers from python3-dev.
+      - run: sudo apt-get update && sudo apt-get install -y python3-dev
+      - run: cargo build --workspace --all-targets
+      - run: cargo test --workspace
+
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy (-D warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - run: sudo apt-get update && sudo apt-get install -y python3-dev
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  py-vpin-wheel:
+    name: py-vpin wheel (maturin)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install maturin
+      # Builds the actual cdylib maturin ships and imports it through a
+      # real CPython interpreter, the only job that exercises the real
+      # extension-module ABI, not just the #[pymethods] impls directly
+      # (that's what the `test` job's rlib build covers).
+      - run: maturin build --release --manifest-path bindings/py-vpin/Cargo.toml --out dist
+      - run: pip install dist/*.whl
+      - name: import and smoke-test
+        shell: python
+        run: |
+          from vpin import VpinEngine
+
+          engine = VpinEngine(bucket_volume=10.0, sigma_window=5, vpin_window=5, cdf_window=None)
+          price = 100.0
+          saw_reading = False
+          for i in range(300):
+              price += 0.5 if i % 2 == 0 else -0.3
+              reading = engine.push_trade(price=price, volume=10.0, ts_ns=i)
+              if reading is not None:
+                  saw_reading = True
+                  assert reading.trades_in_bucket > 0
+                  if reading.vpin is not None:
+                      assert 0.0 <= reading.vpin <= 1.0
+                  if reading.vpin_cdf is not None:
+                      assert 0.0 <= reading.vpin_cdf <= 1.0
+
+          assert saw_reading, "engine never closed a bucket over 300 trades"
+
+          try:
+              VpinEngine(bucket_volume=-1.0, sigma_window=5, vpin_window=5)
+              raise SystemExit("expected ValueError on invalid config")
+          except ValueError:
+              pass
+
+          print("vpin wheel import + smoke test OK:", reading)
