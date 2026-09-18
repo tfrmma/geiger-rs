@@ -31,9 +31,15 @@ impl IntensityAdjustedCdf {
     /// `vpin_engine::VpinEngineConfig::vpin_window`).
     pub fn new(window: usize) -> Result<Self, VpinError> {
         if window < 4 {
-            return Err(VpinError::InvalidWindow { got: window, min: 4 });
+            return Err(VpinError::InvalidWindow {
+                got: window,
+                min: 4,
+            });
         }
-        Ok(IntensityAdjustedCdf { window, history: VecDeque::with_capacity(window) })
+        Ok(IntensityAdjustedCdf {
+            window,
+            history: VecDeque::with_capacity(window),
+        })
     }
 
     /// Pushes `(vpin, trades_in_bucket)` in, returns the rank of `vpin`
@@ -118,13 +124,19 @@ mod tests {
             } else {
                 (0.9 + (i as f64 % 5.0) * 0.01, 200) // busy cohort, spans 0.90-0.94
             };
-            assert!(c.push(vpin, trades).is_none(), "window shouldn't be full yet");
+            assert!(
+                c.push(vpin, trades).is_none(),
+                "window shouldn't be full yet"
+            );
         }
 
         // the 40th push: deliberately the midpoint of the busy cohort's
         // own 0.90-0.94 range, not an incidental value
         let rank = c.push(0.92, 200).unwrap();
-        assert!(rank > 0.1 && rank < 0.9, "expected a mid-range rank within the busy cohort, got {rank}");
+        assert!(
+            rank > 0.1 && rank < 0.9,
+            "expected a mid-range rank within the busy cohort, got {rank}"
+        );
     }
 
     #[test]
@@ -145,8 +157,14 @@ mod tests {
 
         // 0.5 is far above everything in the quiet cohort (near the top)
         // and far below everything in the busy cohort (near the bottom)
-        assert!(rank_in_quiet > 0.8, "0.5 should rank high in a ~0.2-0.3 cohort, got {rank_in_quiet}");
-        assert!(rank_in_busy < 0.2, "0.5 should rank low in a ~0.8-0.9 cohort, got {rank_in_busy}");
+        assert!(
+            rank_in_quiet > 0.8,
+            "0.5 should rank high in a ~0.2-0.3 cohort, got {rank_in_quiet}"
+        );
+        assert!(
+            rank_in_busy < 0.2,
+            "0.5 should rank low in a ~0.8-0.9 cohort, got {rank_in_busy}"
+        );
     }
 
     #[test]
@@ -158,14 +176,21 @@ mod tests {
         // silently collapsing the split back to "everything."
         let mut c = IntensityAdjustedCdf::new(40).unwrap();
         for i in 0..39u32 {
-            let (vpin, trades) = if i % 2 == 0 { (0.3, 5) } else { (0.9 + (i as f64 % 5.0) * 0.01, 200) };
+            let (vpin, trades) = if i % 2 == 0 {
+                (0.3, 5)
+            } else {
+                (0.9 + (i as f64 % 5.0) * 0.01, 200)
+            };
             c.push(vpin, trades);
         }
         // a busy-cohort (200) reading at the midpoint of that cohort's
         // own 0.90-0.94 spread has to rank mid-range, not at the extreme
         // of the full 40-point history
         let rank = c.push(0.92, 200).unwrap();
-        assert!(rank > 0.05 && rank < 0.95, "expected the busy cohort to actually be isolated, got rank {rank}");
+        assert!(
+            rank > 0.05 && rank < 0.95,
+            "expected the busy cohort to actually be isolated, got rank {rank}"
+        );
     }
 
     #[test]
