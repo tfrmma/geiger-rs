@@ -140,7 +140,7 @@ async fn handle_connection(
             message: format!("unknown stream: {key}"),
         };
         write
-            .send(Message::Text(serde_json::to_string(&err)?))
+            .send(Message::Text(serde_json::to_string(&err)?.into()))
             .await?;
         return Err(ServiceError::UnknownStream(key));
     };
@@ -155,7 +155,7 @@ async fn handle_connection(
     // happened yet either, a silent gap instead of a harmless repeat.
     if let Some(snapshot) = entry.last_message.read().await.clone() {
         write
-            .send(Message::Text(serde_json::to_string(&snapshot)?))
+            .send(Message::Text(serde_json::to_string(&snapshot)?.into()))
             .await?;
     }
     tracing::info!(%peer, key, "subscribed");
@@ -165,7 +165,7 @@ async fn handle_connection(
             broadcast_msg = sub_rx.recv() => {
                 match broadcast_msg {
                     Ok(msg) => {
-                        write.send(Message::Text(serde_json::to_string(&msg)?)).await?;
+                        write.send(Message::Text(serde_json::to_string(&msg)?.into())).await?;
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         // slow client missed n messages, that's on them,
@@ -233,7 +233,7 @@ mod tests {
 
         let (mut ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
         ws.send(Message::Text(
-            r#"{"exchange":"binance","symbol":"BTCUSDT"}"#.to_string(),
+            r#"{"exchange":"binance","symbol":"BTCUSDT"}"#.to_string().into(),
         ))
         .await
         .unwrap();
@@ -292,7 +292,7 @@ mod tests {
 
         let (mut ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
         ws.send(Message::Text(
-            r#"{"exchange":"binance","symbol":"BTCUSDT"}"#.to_string(),
+            r#"{"exchange":"binance","symbol":"BTCUSDT"}"#.to_string().into(),
         ))
         .await
         .unwrap();
@@ -319,7 +319,7 @@ mod tests {
 
         let (mut ws, _) = connect_async(format!("ws://{addr}/")).await.unwrap();
         ws.send(Message::Text(
-            r#"{"exchange":"binance","symbol":"DOGEUSDT"}"#.to_string(),
+            r#"{"exchange":"binance","symbol":"DOGEUSDT"}"#.to_string().into(),
         ))
         .await
         .unwrap();
