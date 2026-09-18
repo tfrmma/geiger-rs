@@ -113,12 +113,30 @@ export GEIGER_BIND_ADDR=0.0.0.0:9700         # default shown
 export GEIGER_HEALTH_ADDR=0.0.0.0:9701       # default shown, see "Operational notes"
 export GEIGER_HEARTBEAT_SECS=5               # default shown
 export GEIGER_AUTH_TOKEN=some-shared-secret  # optional, unset = no auth
+export GEIGER_CONFIG_POLL_SECS=30            # optional, unset/0 = no hot-reload, see below
 cargo run -p toxicity-service
 ```
 
 The values in `streams.example.json` are illustrative placeholders, not
 a calibration. `bucket_volume` in particular is instrument-specific, run
 `tools/calibrate` against real captured data before using this live.
+
+### Config hot-reload
+
+With `GEIGER_CONFIG_POLL_SECS` set, the service re-reads
+`GEIGER_STREAMS_FILE` on that interval and starts any stream it finds
+that wasn't already running, no restart needed. A parse error or a
+missing file on a given poll is logged and skipped, not fatal, the
+service keeps running on whatever streams it already has.
+
+This deliberately only ever adds streams. Removing an entry from the
+file does not stop the corresponding worker or disconnect its
+subscribers, there's no clean way to tell an already-connected
+subscriber "this stream is gone" short of dropping its broadcast
+channel and forcing every subscriber to reconnect, and doing that
+automatically over what might just be a typo in the file would be worse
+than a stale stream lingering. Restart the process if you need to
+actually stop tracking a symbol.
 
 ### Health and metrics
 
