@@ -44,7 +44,9 @@ impl TradeRecorder {
     /// Whatever the underlying `OpenOptions::open` returns.
     pub fn create(path: impl AsRef<Path>) -> io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
-        Ok(TradeRecorder { out: BufWriter::new(file) })
+        Ok(TradeRecorder {
+            out: BufWriter::new(file),
+        })
     }
 
     /// # Errors
@@ -80,7 +82,9 @@ impl TradeReader {
     /// # Errors
     /// Whatever the underlying `File::open` returns.
     pub fn open(path: impl AsRef<Path>) -> io::Result<Self> {
-        Ok(TradeReader { input: BufReader::new(File::open(path)?) })
+        Ok(TradeReader {
+            input: BufReader::new(File::open(path)?),
+        })
     }
 }
 
@@ -172,7 +176,11 @@ mod tests {
             ts_recv_ns: seq * 1000 + 50,
             symbol: Symbol::from_bytes(b"BTCUSDT"),
             exchange: Exchange::Binance,
-            taker_side: if seq % 2 == 0 { TakerSide::Buy } else { TakerSide::Sell },
+            taker_side: if seq % 2 == 0 {
+                TakerSide::Buy
+            } else {
+                TakerSide::Sell
+            },
             sequence: seq,
         }
     }
@@ -195,7 +203,10 @@ mod tests {
             rec.flush().unwrap();
         }
 
-        let read: Vec<NormalizedTrade> = TradeReader::open(&path).unwrap().collect::<io::Result<_>>().unwrap();
+        let read: Vec<NormalizedTrade> = TradeReader::open(&path)
+            .unwrap()
+            .collect::<io::Result<_>>()
+            .unwrap();
         assert_eq!(written, read);
     }
 
@@ -214,9 +225,14 @@ mod tests {
 
         let mut reader = TradeReader::open(&path).unwrap();
         assert_eq!(reader.next().unwrap().unwrap(), trade(1));
-        let second = reader.next().expect("truncated record must surface, not be swallowed");
+        let second = reader
+            .next()
+            .expect("truncated record must surface, not be swallowed");
         assert!(second.is_err());
-        assert!(reader.next().is_none(), "reader must stop cleanly after reporting the truncation");
+        assert!(
+            reader.next().is_none(),
+            "reader must stop cleanly after reporting the truncation"
+        );
     }
 
     #[test]
