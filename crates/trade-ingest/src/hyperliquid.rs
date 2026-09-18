@@ -29,9 +29,9 @@ use tokio_tungstenite::tungstenite::Message;
 
 use feedhandler::{Exchange, Symbol};
 
-use backoff::{BackoffConfig, ExponentialBackoff};
 use crate::types::{parse_price, parse_qty, NormalizedTrade, TakerSide};
 use crate::IngestError;
+use backoff::{BackoffConfig, ExponentialBackoff};
 
 const URL: &str = "wss://api.hyperliquid.xyz/ws";
 const APP_PING_INTERVAL: Duration = Duration::from_secs(30); // well under the 60s timeout
@@ -53,7 +53,11 @@ struct WsTrade {
 }
 
 /// See `binance::run`'s doc comment for why this takes an owned `String`.
-pub async fn run(coin: String, tx: mpsc::UnboundedSender<NormalizedTrade>, backoff_cfg: BackoffConfig) {
+pub async fn run(
+    coin: String,
+    tx: mpsc::UnboundedSender<NormalizedTrade>,
+    backoff_cfg: BackoffConfig,
+) {
     let normalized_symbol = Symbol::from_bytes(coin.as_bytes());
     let mut backoff = backoff_cfg.build();
     let mut sequence: u64 = 0;
@@ -61,7 +65,9 @@ pub async fn run(coin: String, tx: mpsc::UnboundedSender<NormalizedTrade>, backo
     loop {
         match run_once(&coin, normalized_symbol, &tx, &mut sequence, &mut backoff).await {
             Ok(()) => tracing::warn!(venue = "hyperliquid", coin, "session closed, reconnecting"),
-            Err(e) => tracing::warn!(venue = "hyperliquid", coin, error = %e, "session error, reconnecting"),
+            Err(e) => {
+                tracing::warn!(venue = "hyperliquid", coin, error = %e, "session error, reconnecting")
+            }
         }
         tokio::time::sleep(backoff.next_delay()).await;
     }
@@ -117,7 +123,11 @@ async fn run_once(
 /// Hyperliquid multiplexes `subscriptionResponse`, `pong`, and `trades`
 /// on the same connection, distinguished by `"channel"`. Anything that
 /// isn't `"trades"` is expected control traffic, not an error.
-fn decode(text: &str, symbol: Symbol, sequence: &mut u64) -> Result<Vec<NormalizedTrade>, IngestError> {
+fn decode(
+    text: &str,
+    symbol: Symbol,
+    sequence: &mut u64,
+) -> Result<Vec<NormalizedTrade>, IngestError> {
     let envelope: ChannelEnvelope = serde_json::from_str(text)?;
     if envelope.channel != "trades" {
         return Ok(Vec::new());
