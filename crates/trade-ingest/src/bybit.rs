@@ -90,7 +90,7 @@ async fn run_once(
         "op": "subscribe",
         "args": [format!("publicTrade.{symbol}")],
     });
-    write.send(Message::Text(sub.to_string())).await?;
+    write.send(Message::Text(sub.to_string().into())).await?;
 
     let mut ping_tick = tokio::time::interval(APP_PING_INTERVAL);
     ping_tick.tick().await; // first tick is immediate, we just connected, skip it
@@ -98,7 +98,9 @@ async fn run_once(
     loop {
         tokio::select! {
             _ = ping_tick.tick() => {
-                write.send(Message::Text(r#"{"op":"ping"}"#.to_string())).await?;
+                write
+                    .send(Message::Text(r#"{"op":"ping"}"#.to_string().into()))
+                    .await?;
             }
             msg = read.next() => {
                 match msg {
