@@ -70,8 +70,14 @@ impl VolumeBucketer {
     /// here (Easley et al. use it too, real trades don't divide evenly
     /// into any bucket size you pick).
     pub fn push(&mut self, price: f64, volume: f64, ts_ns: u64) -> Option<ClosedBucket> {
-        debug_assert!(price.is_finite() && price > 0.0, "non-finite or non-positive trade price");
-        debug_assert!(volume.is_finite() && volume > 0.0, "non-finite or non-positive trade volume");
+        debug_assert!(
+            price.is_finite() && price > 0.0,
+            "non-finite or non-positive trade price"
+        );
+        debug_assert!(
+            volume.is_finite() && volume > 0.0,
+            "non-finite or non-positive trade volume"
+        );
 
         if !self.started {
             self.prev_bucket_close_price = Some(price);
