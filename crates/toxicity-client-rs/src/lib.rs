@@ -70,7 +70,14 @@ impl ToxicityClient {
         backoff_cfg: BackoffConfig,
     ) -> Self {
         let (tx, rx) = watch::channel(ToxicityState::Connecting);
-        let task = tokio::spawn(run(url.into(), exchange.into(), symbol.into(), stale_after, backoff_cfg, tx));
+        let task = tokio::spawn(run(
+            url.into(),
+            exchange.into(),
+            symbol.into(),
+            stale_after,
+            backoff_cfg,
+            tx,
+        ));
         ToxicityClient { rx, task }
     }
 
@@ -95,7 +102,11 @@ async fn run(
         let _ = tx.send(ToxicityState::Connecting);
         match run_once(&url, &exchange, &symbol, stale_after, &tx, &mut backoff).await {
             Ok(()) => {
-                tracing::warn!(exchange, symbol, "toxicity-service session closed, reconnecting");
+                tracing::warn!(
+                    exchange,
+                    symbol,
+                    "toxicity-service session closed, reconnecting"
+                );
             }
             Err(e) => {
                 tracing::warn!(exchange, symbol, error = %e, "toxicity-service session error, reconnecting");
@@ -119,14 +130,20 @@ async fn run_once(
     backoff.reset();
     let (mut write, mut read) = ws.split();
 
-    let sub = SubscribeRequest { exchange: exchange.to_string(), symbol: symbol.to_string() };
-    write.send(Message::Text(serde_json::to_string(&sub)?)).await?;
+    let sub = SubscribeRequest {
+        exchange: exchange.to_string(),
+        symbol: symbol.to_string(),
+    };
+    write
+        .send(Message::Text(serde_json::to_string(&sub)?))
+        .await?;
 
     // Checked at twice the staleness threshold's frequency so the
     // detection latency is bounded well under `stale_after` itself,
     // rather than possibly waiting up to a full `stale_after` extra
     // before noticing.
-    let mut staleness_check = tokio::time::interval((stale_after / 2).max(Duration::from_millis(1)));
+    let mut staleness_check =
+        tokio::time::interval((stale_after / 2).max(Duration::from_millis(1)));
     staleness_check.tick().await; // first tick is immediate, skip it
 
     let mut last_msg_at = tokio::time::Instant::now();
@@ -166,9 +183,18 @@ fn handle_message(text: &str, exchange: &str, symbol: &str, tx: &watch::Sender<T
     };
 
     match msg {
-        ServerMessage::Reading { vpin, vpin_cdf, trades_in_bucket, .. } => {
+        ServerMessage::Reading {
+            vpin,
+            vpin_cdf,
+            trades_in_bucket,
+            ..
+        } => {
             let state = match vpin {
-                Some(v) => ToxicityState::Live { vpin: v, vpin_cdf, trades_in_bucket },
+                Some(v) => ToxicityState::Live {
+                    vpin: v,
+                    vpin_cdf,
+                    trades_in_bucket,
+                },
                 None => ToxicityState::Warming { trades_in_bucket },
             };
             let _ = tx.send(state);
@@ -182,7 +208,9 @@ fn handle_message(text: &str, exchange: &str, symbol: &str, tx: &watch::Sender<T
             // shouldn't downgrade a real reading.
             tx.send_if_modified(|current| {
                 if matches!(current, ToxicityState::Stale | ToxicityState::Connecting) {
-                    *current = ToxicityState::Warming { trades_in_bucket: 0 };
+                    *current = ToxicityState::Warming {
+                        trades_in_bucket: 0,
+                    };
                     true
                 } else {
                     false
@@ -190,7 +218,12 @@ fn handle_message(text: &str, exchange: &str, symbol: &str, tx: &watch::Sender<T
             });
         }
         ServerMessage::Error { message } => {
-            tracing::warn!(exchange, symbol, message, "toxicity-service reported an error");
+            tracing::warn!(
+                exchange,
+                symbol,
+                message,
+                "toxicity-service reported an error"
+            );
         }
     }
 }
@@ -205,7 +238,9 @@ mod tests {
     /// `ServerMessage`s the test hands it over `to_send`. This is a real
     /// WebSocket server and a real `ToxicityClient` talking over a real
     /// (local) socket, not a mocked transport.
-    async fn spawn_fake_server(mut to_send: tokio::sync::mpsc::UnboundedReceiver<ServerMessage>) -> String {
+    async fn spawn_fake_server(
+        mut to_send: tokio::sync::mpsc::UnboundedReceiver<ServerMessage>,
+    ) -> String {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -228,7 +263,10 @@ mod tests {
         format!("ws://{addr}")
     }
 
-    async fn wait_for<F: Fn(&ToxicityState) -> bool>(client: &ToxicityClient, cond: F) -> ToxicityState {
+    async fn wait_for<F: Fn(&ToxicityState) -> bool>(
+        client: &ToxicityClient,
+        cond: F,
+    ) -> ToxicityState {
         for _ in 0..200 {
             let s = client.state();
             if cond(&s) {
@@ -236,14 +274,23 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        panic!("condition never became true within 2s, last state: {:?}", client.state());
+        panic!(
+            "condition never became true within 2s, last state: {:?}",
+            client.state()
+        );
     }
 
     #[tokio::test]
     async fn goes_from_connecting_to_live_on_a_reading() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30), BackoffConfig::default());
+        let client = ToxicityClient::connect(
+            url,
+            "binance",
+            "BTCUSDT",
+            Duration::from_secs(30),
+            BackoffConfig::default(),
+        );
 
         assert_eq!(client.state(), ToxicityState::Connecting);
 
@@ -259,14 +306,27 @@ mod tests {
         .unwrap();
 
         let state = wait_for(&client, |s| s.is_live()).await;
-        assert_eq!(state, ToxicityState::Live { vpin: 0.42, vpin_cdf: Some(0.9), trades_in_bucket: 12 });
+        assert_eq!(
+            state,
+            ToxicityState::Live {
+                vpin: 0.42,
+                vpin_cdf: Some(0.9),
+                trades_in_bucket: 12
+            }
+        );
     }
 
     #[tokio::test]
     async fn warmup_reading_maps_to_warming_not_live() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "bybit", "ETHUSDT", Duration::from_secs(30), BackoffConfig::default());
+        let client = ToxicityClient::connect(
+            url,
+            "bybit",
+            "ETHUSDT",
+            Duration::from_secs(30),
+            BackoffConfig::default(),
+        );
 
         tx.send(ServerMessage::Reading {
             exchange: "bybit".into(),
@@ -280,7 +340,12 @@ mod tests {
         .unwrap();
 
         let state = wait_for(&client, |s| matches!(s, ToxicityState::Warming { .. })).await;
-        assert_eq!(state, ToxicityState::Warming { trades_in_bucket: 3 });
+        assert_eq!(
+            state,
+            ToxicityState::Warming {
+                trades_in_bucket: 3
+            }
+        );
         assert!(!state.is_live());
     }
 
@@ -288,7 +353,13 @@ mod tests {
     async fn goes_stale_when_messages_stop_arriving() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "hyperliquid", "BTC", Duration::from_millis(100), BackoffConfig::default());
+        let client = ToxicityClient::connect(
+            url,
+            "hyperliquid",
+            "BTC",
+            Duration::from_millis(100),
+            BackoffConfig::default(),
+        );
 
         tx.send(ServerMessage::Heartbeat { ts_ns: 0 }).unwrap();
         wait_for(&client, |s| !matches!(s, ToxicityState::Connecting)).await;
@@ -304,7 +375,13 @@ mod tests {
     async fn heartbeat_does_not_downgrade_an_existing_live_reading() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30), BackoffConfig::default());
+        let client = ToxicityClient::connect(
+            url,
+            "binance",
+            "BTCUSDT",
+            Duration::from_secs(30),
+            BackoffConfig::default(),
+        );
 
         tx.send(ServerMessage::Reading {
             exchange: "binance".into(),
@@ -322,14 +399,27 @@ mod tests {
         // give the heartbeat a moment to be processed, then confirm the
         // Live reading is still there, not reset to Warming
         tokio::time::sleep(Duration::from_millis(50)).await;
-        assert_eq!(client.state(), ToxicityState::Live { vpin: 0.7, vpin_cdf: Some(0.95), trades_in_bucket: 5 });
+        assert_eq!(
+            client.state(),
+            ToxicityState::Live {
+                vpin: 0.7,
+                vpin_cdf: Some(0.95),
+                trades_in_bucket: 5
+            }
+        );
     }
 
     #[tokio::test]
     async fn dropping_the_client_ends_the_background_task() {
         let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
         let url = spawn_fake_server(rx).await;
-        let client = ToxicityClient::connect(url, "binance", "BTCUSDT", Duration::from_secs(30), BackoffConfig::default());
+        let client = ToxicityClient::connect(
+            url,
+            "binance",
+            "BTCUSDT",
+            Duration::from_secs(30),
+            BackoffConfig::default(),
+        );
         let task = client.task.abort_handle();
         drop(client);
         // give the runtime a moment to actually process the abort
