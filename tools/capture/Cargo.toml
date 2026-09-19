@@ -1,0 +1,14 @@
+[package]
+name = "capture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+trade-ingest       = { path = "../../crates/trade-ingest" }
+backoff            = { path = "../../crates/backoff" }
+feedhandler        = { workspace = true }
+tokio              = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
