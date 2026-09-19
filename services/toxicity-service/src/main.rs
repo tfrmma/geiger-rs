@@ -66,6 +66,7 @@ fn resolve_stream(s: &StreamConfig) -> Result<(Exchange, VpinEngineConfig), Stri
         sigma_window: s.sigma_window,
         vpin_window: s.vpin_window,
         cdf_window: s.cdf_window,
+        confidence_interval: None,
     };
     // Constructing (and dropping) one is the validation, `VpinEngine::new`
     // is the single source of truth for what "valid" means here, this
