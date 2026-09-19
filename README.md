@@ -88,7 +88,7 @@ COIN-margined-style fixed-notional contract counts.
 
 | Path | What it is |
 |---|---|
-| `crates/vpin-engine` | Pure compute: volume-clock bucketer, BVC classification, rolling sigma, rolling VPIN, CDF transform, plus `IntensityAdjustedCdf` (a reference intensity correction). No I/O, no exchange-specific code. |
+| `crates/vpin-engine` | Pure compute: volume-clock bucketer, BVC classification, rolling sigma, rolling VPIN, CDF transform, an opt-in bootstrap confidence interval around each VPIN reading, plus `IntensityAdjustedCdf` (a reference intensity correction). No I/O, no exchange-specific code. |
 | `crates/trade-ingest` | WS adapters: Binance USDⓈ-M futures (`aggTrade`), Bybit v5 linear (`publicTrade`), Hyperliquid perps (`trades`). Includes `capture`, a bit-stable recorder/reader for building trade tapes offline. |
 | `crates/backoff` | Exponential backoff shared by the ingest adapters and the Rust client. |
 | `crates/toxicity-client-rs` | Rust subscriber. `ToxicityClient::connect(...)` runs in the background; `.state()` is synchronous (backed by a `watch` channel), safe to call from a hot quoting loop. |
