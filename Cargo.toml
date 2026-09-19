@@ -8,6 +8,7 @@ members = [
     "services/toxicity-service",
     "bindings/py-vpin",
     "tools/calibrate",
+    "tools/capture",
 ]
 
 [workspace.package]
