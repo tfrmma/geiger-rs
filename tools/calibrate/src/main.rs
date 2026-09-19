@@ -127,11 +127,11 @@ struct Stats {
     /// "if I pick this bucket_volume, how often do I actually get a
     /// fresh reading" independent of what VPIN's value comes out to.
     avg_bucket_interval_ms: f64,
-    /// Fraction of buckets where BVC's majority-side call (buy_fraction
-    /// > 0.5) agreed with the real taker-side majority (by volume) for
-    /// that bucket, using the ground truth every exchange adapter
-    /// captures in `NormalizedTrade::taker_side` but `vpin-engine` never
-    /// looks at. `NaN` if sigma never warmed up for this config.
+    /// Fraction of buckets where BVC's majority-side call (buy_fraction >
+    /// 0.5) agreed with the real taker-side majority (by volume) for that
+    /// bucket, using the ground truth every exchange adapter captures in
+    /// `NormalizedTrade::taker_side` but `vpin-engine` never looks at.
+    /// `NaN` if sigma never warmed up for this config.
     bvc_accuracy: f64,
     /// Mean |BVC's buy_fraction - true volume-weighted buy_fraction|
     /// across compared buckets. Complements `bvc_accuracy`: two configs
