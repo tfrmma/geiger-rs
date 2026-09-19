@@ -30,4 +30,6 @@ pub use bucket::{ClosedBucket, VolumeBucketer};
 pub use bvc::{buy_fraction, classify};
 pub use error::VpinError;
 pub use intensity::IntensityAdjustedCdf;
-pub use vpin::{EmpiricalCdf, RollingSigma, VpinEngine, VpinEngineConfig, VpinReading};
+pub use vpin::{
+    ConfidenceIntervalConfig, EmpiricalCdf, RollingSigma, VpinEngine, VpinEngineConfig, VpinReading,
+};
