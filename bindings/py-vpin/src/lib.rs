@@ -23,7 +23,13 @@ use pyo3::prelude::*;
 
 use vpin_engine::{VpinEngine, VpinEngineConfig, VpinReading};
 
-/// One VPIN reading, mirrors `vpin_engine::VpinReading` field for field.
+/// One VPIN reading. Mirrors `vpin_engine::VpinReading` except for
+/// `vpin_ci_low`/`vpin_ci_high`: this binding always constructs its
+/// `VpinEngine` with `confidence_interval: None` (see `new` below), so
+/// those two would only ever read `None` here anyway. Exposing the
+/// bootstrap CI to Python — a constructor param plus these two fields —
+/// is a natural follow-up, not done here to keep this change scoped to
+/// `vpin-engine` itself.
 #[pyclass(name = "VpinReading", module = "vpin", frozen)]
 struct PyVpinReading {
     #[pyo3(get)]
@@ -97,6 +103,7 @@ impl PyVpinEngine {
             sigma_window,
             vpin_window,
             cdf_window,
+            confidence_interval: None,
         };
         let inner = VpinEngine::new(cfg).map_err(|e| PyValueError::new_err(e.to_string()))?;
         Ok(PyVpinEngine { inner })
