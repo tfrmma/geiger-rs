@@ -7,4 +7,10 @@ pub enum VpinError {
 
     #[error("window size must be at least {min}, got {got}")]
     InvalidWindow { got: usize, min: usize },
+
+    #[error("confidence level must be in (0, 1) exclusive, got {0}")]
+    InvalidConfidenceLevel(f64),
+
+    #[error("bootstrap sample count must be at least {min}, got {got}")]
+    InvalidBootstrapSamples { got: usize, min: usize },
 }
