@@ -11,13 +11,6 @@
 //! much that probabilistic classification actually costs you on your
 //! own instrument instead of taking it on faith.
 //!
-//! This is NOT `realistic-mm-backtester`: there's no fill simulation, no
-//! PnL, no order queue, this only measures the VPIN estimator itself
-//! (does it warm up in a reasonable fraction of the tape, what's its
-//! mean/spread, how often does a bucket actually close in wall-clock
-//! time at this volume). Testing whether a *strategy* that reacts to
-//! this signal makes money is `mmbt`'s job, not this tool's.
-//!
 //! What this deliberately does NOT do: validate VPIN spikes against
 //! known toxic/informed-trading episodes. That needs labeled ground
 //! truth (timestamps of real flash crashes, known toxic prints, etc.)
@@ -151,6 +144,7 @@ fn calibrate_one(
         sigma_window: window,
         vpin_window: window,
         cdf_window,
+        confidence_interval: None,
     })?;
 
     let mut total_buckets: u64 = 0;
