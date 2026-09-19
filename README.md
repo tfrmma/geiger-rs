@@ -51,6 +51,11 @@ Binance / Bybit / Hyperliquid  (perpetual futures trade streams)
 `crates/backoff` is a small reconnect-with-backoff utility shared by the
 exchange adapters and the Rust client.
 
+`tools/capture` is a standalone binary that connects to one
+`crates/trade-ingest` adapter live and writes everything to a capture
+file, the same format `tools/calibrate` reads back offline — see
+"Building a trade tape" below.
+
 Only trades feed the VPIN calculation, not the order book, VPIN needs
 executed volume classified by direction, which is a different data
 stream from L2 book depth.
@@ -90,6 +95,7 @@ COIN-margined-style fixed-notional contract counts.
 | `services/toxicity-service` | The service binary. Wires trade streams into per-(exchange, symbol) `vpin-engine` instances and fans out readings over a WebSocket as JSON: continuous score and CDF, not a discretized tier, that policy is left to each consumer. |
 | `bindings/py-vpin` | Python bindings (`pyo3`/`maturin`) directly over `vpin-engine`, for Python-based consumers. |
 | `tools/calibrate` | Offline: replay a captured trade tape through `vpin-engine` across a grid of `(bucket_volume, window)` values, printing descriptive stats plus how often BVC's classification actually matches the real taker side (`bvc_accuracy`/`bvc_mae`), to help pick parameters for a given instrument. |
+| `tools/capture` | Standalone: connects to one `trade-ingest` adapter live and writes everything to a capture file, the same format `tools/calibrate` reads back. Runs until Ctrl-C. |
 | `services/dashboard` | Planned, not yet implemented. |
 
 ## Getting started
@@ -187,6 +193,20 @@ reading = engine.push_trade(price=100.5, volume=2.3, ts_ns=...)
 if reading is not None and reading.vpin is not None:
     print(reading.vpin, reading.vpin_cdf)
 ```
+
+### Building a trade tape
+
+```bash
+cargo run -p capture -- binance BTCUSDT trades.cap
+# ... let it run, Ctrl-C when you have enough ...
+```
+
+Connects to one exchange/symbol live and appends every trade to
+`trades.cap` in the format `trade_ingest::capture` reads and writes,
+flushing every 100 trades (`--flush-every N` to change that) and every 5
+seconds regardless, so a quiet symbol doesn't sit on unflushed data
+indefinitely. Re-running against the same output file resumes that tape
+(the format header is validated on reopen) rather than overwriting it.
 
 ### Calibrating
 
