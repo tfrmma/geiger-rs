@@ -306,9 +306,8 @@ mod tests {
             // checking
             price += if i % 2 == 0 { 0.5 } else { -0.3 };
             if let Some(reading) = engine.push_trade(price, 10.0, i) {
-                if reading.vpin.is_some() {
+                if let Some(v) = reading.vpin {
                     saw_a_value = true;
-                    let v = reading.vpin.unwrap();
                     assert!((0.0..=1.0).contains(&v), "VPIN out of [0,1]: {v}");
                 }
             }
