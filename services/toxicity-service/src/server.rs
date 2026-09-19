@@ -70,6 +70,14 @@ pub async fn run(
 /// message: rejecting at the HTTP layer means an unauthorized client
 /// never gets a completed WS connection at all, not even a "here's an
 /// error message" one.
+///
+/// `ErrorResponse` (an `http::Response`) isn't a type this function
+/// picked: it's exactly what the `Callback` trait `accept_hdr_async`
+/// requires the handshake closure below to return (see `handle_connection`),
+/// so its size isn't something boxing here would actually improve, the
+/// full `Response` still has to exist to satisfy that closure's own
+/// mandated signature either way.
+#[allow(clippy::result_large_err)]
 fn check_auth(req: &Request, auth_token: &AuthToken) -> Result<(), ErrorResponse> {
     let Some(expected) = auth_token else {
         return Ok(());
@@ -113,19 +121,20 @@ async fn handle_connection(
     registry: Registry,
     auth_token: AuthToken,
 ) -> Result<(), ServiceError> {
-    let ws = tokio_tungstenite::accept_hdr_async(
-        stream,
-        |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
-            match check_auth(req, &auth_token) {
-                Ok(()) => Ok(res),
-                Err(rejection) => {
-                    tracing::warn!(%peer, "rejected unauthorized connection attempt");
-                    Err(rejection)
-                }
+    // `Result<Response, ErrorResponse>` is the `Callback` trait's
+    // required return type, not a choice made here, see the note on
+    // `check_auth`.
+    #[allow(clippy::result_large_err)]
+    let on_handshake = |req: &Request, res: Response| -> Result<Response, ErrorResponse> {
+        match check_auth(req, &auth_token) {
+            Ok(()) => Ok(res),
+            Err(rejection) => {
+                tracing::warn!(%peer, "rejected unauthorized connection attempt");
+                Err(rejection)
             }
-        },
-    )
-    .await?;
+        }
+    };
+    let ws = tokio_tungstenite::accept_hdr_async(stream, on_handshake).await?;
     let (mut write, mut read) = ws.split();
 
     let sub = match read.next().await {
