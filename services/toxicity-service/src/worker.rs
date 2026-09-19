@@ -131,6 +131,7 @@ mod tests {
             sigma_window: 3,
             vpin_window: 3,
             cdf_window: None,
+            confidence_interval: None,
         };
 
         let handle = tokio::spawn(run(
@@ -217,6 +218,7 @@ mod tests {
             sigma_window: 3,
             vpin_window: 3,
             cdf_window: None,
+            confidence_interval: None,
         };
         tokio::spawn(run(
             "bybit".to_string(),
@@ -260,6 +262,7 @@ mod tests {
             sigma_window: 3,
             vpin_window: 3,
             cdf_window: None,
+            confidence_interval: None,
         };
 
         let handle = tokio::spawn(run(
