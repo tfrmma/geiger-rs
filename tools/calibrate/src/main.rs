@@ -581,7 +581,7 @@ fn csv_row(r: &SweepResult) -> Vec<String> {
             // (total_buckets .. bvc_accuracy_p_value): nothing to report,
             // the config itself was rejected before any of them could be
             // computed.
-            fields.extend(std::iter::repeat(String::new()).take(11));
+            fields.extend(std::iter::repeat_n(String::new(), 11));
             fields.push(csv_escape(&e.to_string()));
             fields
         }
