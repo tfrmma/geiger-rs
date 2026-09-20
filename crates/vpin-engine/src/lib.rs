@@ -27,7 +27,7 @@ mod intensity;
 mod vpin;
 
 pub use bucket::{ClosedBucket, VolumeBucketer};
-pub use bvc::{buy_fraction, classify};
+pub use bvc::{buy_fraction, classify, standard_normal_cdf};
 pub use error::VpinError;
 pub use intensity::IntensityAdjustedCdf;
 pub use vpin::{
