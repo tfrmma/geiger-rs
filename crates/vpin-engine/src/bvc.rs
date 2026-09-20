@@ -27,8 +27,14 @@ use libm::erf;
 /// Standard normal CDF via `erf`: Phi(x) = 0.5 * (1 + erf(x / sqrt(2))).
 /// `libm::erf` is a full double-precision port of MUSL's implementation,
 /// not a hand-rolled polynomial approximation, no accuracy tradeoff here.
+///
+/// Public (not just used internally by `classify` below): it's a
+/// generic statistical primitive, not BVC-specific, and `tools/calibrate`
+/// needs the exact same function for its two-proportion significance
+/// test. Better that than a second, potentially-drifting copy of Phi(x)
+/// living in a different crate.
 #[inline]
-fn standard_normal_cdf(x: f64) -> f64 {
+pub fn standard_normal_cdf(x: f64) -> f64 {
     0.5 * (1.0 + erf(x * std::f64::consts::FRAC_1_SQRT_2))
 }
 
