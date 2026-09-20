@@ -1,15 +1,30 @@
 //! Offline VPIN parameter sweep: replay a captured trade tape (see
 //! `trade_ingest::capture`) through `vpin-engine` at every combination of
-//! `bucket_volume` x `window` you give it, and print descriptive stats
-//! for each so a human can pick a reasonable pair.
+//! `bucket_volume` x `sigma_window` x `vpin_window` you give it, and
+//! report descriptive stats for each so a human can pick a reasonable
+//! combination. `sigma_window` and `vpin_window` sweep independently
+//! (they don't have to be the same value, even though `VpinEngineConfig`
+//! happens to accept them separately too): BVC's classification quality
+//! depends only on `sigma_window`, while `vpin_window` only controls how
+//! many classified buckets get averaged into one VPIN score, they're
+//! answering different questions and coupling them in a sweep hides that.
 //!
 //! Also reports how often BVC's probabilistic buy/sell call actually
 //! matches the real taker side each exchange adapter captures in
-//! `NormalizedTrade::taker_side` (`bvc_accuracy`/`bvc_mae` columns).
-//! `vpin-engine` never looks at this field by design (BVC exists
-//! specifically to avoid needing it), this is what lets you check how
-//! much that probabilistic classification actually costs you on your
-//! own instrument instead of taking it on faith.
+//! `NormalizedTrade::taker_side` (`bvc_accuracy`/`bvc_mae` columns), plus
+//! a `bvc_p_value` comparing each config's accuracy against the sweep's
+//! best one, see `two_proportion_p_value`. `vpin-engine` never looks at
+//! `taker_side` by design (BVC exists specifically to avoid needing it),
+//! this is what lets you check how much that probabilistic classification
+//! actually costs you on your own instrument instead of taking it on
+//! faith.
+//!
+//! This is NOT `realistic-mm-backtester`: there's no fill simulation, no
+//! PnL, no order queue, this only measures the VPIN estimator itself
+//! (does it warm up in a reasonable fraction of the tape, what's its
+//! mean/spread, how often does a bucket actually close in wall-clock
+//! time at this volume). Testing whether a *strategy* that reacts to
+//! this signal makes money is `mmbt`'s job, not this tool's.
 //!
 //! What this deliberately does NOT do: validate VPIN spikes against
 //! known toxic/informed-trading episodes. That needs labeled ground
@@ -21,7 +36,13 @@
 //! land in the VPIN/CDF distribution.
 //!
 //! Usage:
-//!   calibrate <capture-file> --bucket-volumes 10,25,50,100 --windows 20,50,100 [--cdf-window 250]
+//!   calibrate <capture-file> --bucket-volumes 10,25,50,100 \
+//!       --sigma-windows 20,50,100 --vpin-windows 20,50,100 \
+//!       [--cdf-window 250] [--format table|csv|json]
+//!
+//! `--format` defaults to `table` (human-readable, stdout). `csv` and
+//! `json` are for piping into a notebook/spreadsheet, both go to stdout
+//! too, redirect with shell `>` if you want a file.
 //!
 //! One pitfall worth knowing about when reading the output: if
 //! `non_warmup_reads` stays near zero no matter how large the tape is,
@@ -39,7 +60,8 @@ use std::process::ExitCode;
 use trade_ingest::capture::TradeReader;
 use trade_ingest::TakerSide;
 use vpin_engine::{
-    classify, RollingSigma, VolumeBucketer, VpinEngine, VpinEngineConfig, VpinError,
+    classify, standard_normal_cdf, RollingSigma, VolumeBucketer, VpinEngine, VpinEngineConfig,
+    VpinError,
 };
 
 struct Trade {
@@ -49,22 +71,46 @@ struct Trade {
     taker_side: TakerSide,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum OutputFormat {
+    Table,
+    Csv,
+    Json,
+}
+
+impl std::str::FromStr for OutputFormat {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "table" => Ok(OutputFormat::Table),
+            "csv" => Ok(OutputFormat::Csv),
+            "json" => Ok(OutputFormat::Json),
+            other => Err(format!(
+                "unknown --format {other:?}, expected table, csv, or json"
+            )),
+        }
+    }
+}
+
 struct Args {
     file: String,
     bucket_volumes: Vec<f64>,
-    windows: Vec<usize>,
+    sigma_windows: Vec<usize>,
+    vpin_windows: Vec<usize>,
     cdf_window: Option<usize>,
+    format: OutputFormat,
 }
 
-const USAGE: &str =
-    "usage: calibrate <capture-file> --bucket-volumes V1,V2,... --windows N1,N2,... [--cdf-window N]";
+const USAGE: &str = "usage: calibrate <capture-file> --bucket-volumes V1,V2,... --sigma-windows N1,N2,... --vpin-windows N1,N2,... [--cdf-window N] [--format table|csv|json]";
 
 fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args, String> {
     let file = args.next().ok_or(USAGE)?;
 
     let mut bucket_volumes = None;
-    let mut windows = None;
+    let mut sigma_windows = None;
+    let mut vpin_windows = None;
     let mut cdf_window = None;
+    let mut format = OutputFormat::Table;
 
     while let Some(flag) = args.next() {
         let value = args
@@ -72,7 +118,8 @@ fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args, String> {
             .ok_or_else(|| format!("missing value for {flag}"))?;
         match flag.as_str() {
             "--bucket-volumes" => bucket_volumes = Some(parse_csv(&value, "--bucket-volumes")?),
-            "--windows" => windows = Some(parse_csv(&value, "--windows")?),
+            "--sigma-windows" => sigma_windows = Some(parse_csv(&value, "--sigma-windows")?),
+            "--vpin-windows" => vpin_windows = Some(parse_csv(&value, "--vpin-windows")?),
             "--cdf-window" => {
                 cdf_window = Some(
                     value
@@ -80,6 +127,7 @@ fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args, String> {
                         .map_err(|e| format!("bad --cdf-window {value:?}: {e}"))?,
                 )
             }
+            "--format" => format = value.parse()?,
             other => return Err(format!("unknown flag: {other}\n{USAGE}")),
         }
     }
@@ -88,8 +136,10 @@ fn parse_args<I: Iterator<Item = String>>(mut args: I) -> Result<Args, String> {
         file,
         bucket_volumes: bucket_volumes
             .ok_or_else(|| format!("missing --bucket-volumes\n{USAGE}"))?,
-        windows: windows.ok_or_else(|| format!("missing --windows\n{USAGE}"))?,
+        sigma_windows: sigma_windows.ok_or_else(|| format!("missing --sigma-windows\n{USAGE}"))?,
+        vpin_windows: vpin_windows.ok_or_else(|| format!("missing --vpin-windows\n{USAGE}"))?,
         cdf_window,
+        format,
     })
 }
 
@@ -106,9 +156,11 @@ where
         .collect()
 }
 
+#[derive(Debug, Clone)]
 struct Stats {
     bucket_volume: f64,
-    window: usize,
+    sigma_window: usize,
+    vpin_window: usize,
     total_buckets: u64,
     non_warmup_readings: u64,
     vpin_mean: f64,
@@ -131,18 +183,41 @@ struct Stats {
     /// can have the same majority-call accuracy while one is
     /// systematically closer to the true split and the other isn't.
     bvc_mean_abs_error: f64,
+    /// Number of buckets `bvc_accuracy`/`bvc_mean_abs_error` are actually
+    /// computed over (sigma warmed up). This is `n` for
+    /// `bvc_accuracy_p_value`'s significance test, not just informational.
+    bvc_compared: u64,
+    /// Two-tailed p-value from a two-proportion z-test comparing this
+    /// config's `bvc_accuracy` against the sweep's single best
+    /// `bvc_accuracy`. `NaN` for the best config itself (nothing to
+    /// compare it against) or when either side has too few compared
+    /// buckets, see `two_proportion_p_value`. A small value (conventionally
+    /// < 0.05) means this config's accuracy is unlikely to just be noise
+    /// around the best one's; a large value means the difference could
+    /// easily be sampling noise from a finite tape, not necessarily a
+    /// real difference in classification quality.
+    bvc_accuracy_p_value: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BvcStats {
+    accuracy: f64,
+    mean_abs_error: f64,
+    compared: u64,
 }
 
 fn calibrate_one(
     trades: &[Trade],
     bucket_volume: f64,
-    window: usize,
+    sigma_window: usize,
+    vpin_window: usize,
     cdf_window: Option<usize>,
+    bvc: BvcStats,
 ) -> Result<Stats, VpinError> {
     let mut engine = VpinEngine::new(VpinEngineConfig {
         bucket_volume,
-        sigma_window: window,
-        vpin_window: window,
+        sigma_window,
+        vpin_window,
         cdf_window,
         confidence_interval: None,
     })?;
@@ -162,11 +237,11 @@ fn calibrate_one(
     }
 
     let (vpin_mean, vpin_min, vpin_max, vpin_stddev) = summarize(&vpins);
-    let (bvc_accuracy, bvc_mean_abs_error) = bvc_accuracy_stats(trades, bucket_volume, window)?;
 
     Ok(Stats {
         bucket_volume,
-        window,
+        sigma_window,
+        vpin_window,
         total_buckets,
         non_warmup_readings: vpins.len() as u64,
         vpin_mean,
@@ -174,8 +249,10 @@ fn calibrate_one(
         vpin_max,
         vpin_stddev,
         avg_bucket_interval_ms: mean_interval_ms(&close_times),
-        bvc_accuracy,
-        bvc_mean_abs_error,
+        bvc_accuracy: bvc.accuracy,
+        bvc_mean_abs_error: bvc.mean_abs_error,
+        bvc_compared: bvc.compared,
+        bvc_accuracy_p_value: f64::NAN,
     })
 }
 
@@ -189,11 +266,17 @@ fn calibrate_one(
 /// discipline as `VpinEngine::push_trade`: classify with sigma from
 /// before this bucket, advance sigma with this bucket's own delta_p
 /// only after.
+///
+/// Depends only on `bucket_volume` and `sigma_window`, not
+/// `vpin_window`: `run_sweep` below relies on that to call this once per
+/// `(bucket_volume, sigma_window)` pair and reuse the result across
+/// every `vpin_window` in the sweep, rather than replaying the whole
+/// tape redundantly once per `vpin_window` for an identical answer.
 fn bvc_accuracy_stats(
     trades: &[Trade],
     bucket_volume: f64,
     sigma_window: usize,
-) -> Result<(f64, f64), VpinError> {
+) -> Result<BvcStats, VpinError> {
     let mut bucketer = VolumeBucketer::new(bucket_volume)?;
     let mut sigma = RollingSigma::new(sigma_window)?;
 
@@ -238,7 +321,108 @@ fn bvc_accuracy_stats(
     } else {
         abs_errors.iter().sum::<f64>() / abs_errors.len() as f64
     };
-    Ok((accuracy, mae))
+    Ok(BvcStats {
+        accuracy,
+        mean_abs_error: mae,
+        compared,
+    })
+}
+
+/// Two-proportion z-test (Wald, unpooled variance): is `p1` (over `n1`
+/// compared buckets) actually different from `p2` (over `n2`), or is the
+/// gap explainable by finite-sample noise alone? `bvc_accuracy` is a
+/// plain proportion (successes/trials), which has a well-known closed
+/// form for its sampling variance, unlike VPIN itself — a ratio of sums,
+/// not a simple proportion — which needed a bootstrap instead (see
+/// `vpin_engine::ConfidenceIntervalConfig`'s doc comment for why). No
+/// bootstrap needed here, the closed form is exact enough for this.
+///
+/// Returns the two-tailed p-value, or `NaN` if either side has fewer
+/// than `MIN_COMPARED` compared buckets (too few for the normal
+/// approximation this test relies on to be trustworthy) or either
+/// proportion is itself `NaN`.
+fn two_proportion_p_value(p1: f64, n1: u64, p2: f64, n2: u64) -> f64 {
+    const MIN_COMPARED: u64 = 30;
+    if n1 < MIN_COMPARED || n2 < MIN_COMPARED || p1.is_nan() || p2.is_nan() {
+        return f64::NAN;
+    }
+    let n1 = n1 as f64;
+    let n2 = n2 as f64;
+    let se = (p1 * (1.0 - p1) / n1 + p2 * (1.0 - p2) / n2).sqrt();
+    if se == 0.0 {
+        // The only way se==0 with both n's above MIN_COMPARED is p1==p2
+        // exactly, nothing to distinguish, not a degenerate error case.
+        return 1.0;
+    }
+    let z = (p1 - p2) / se;
+    2.0 * (1.0 - standard_normal_cdf(z.abs()))
+}
+
+struct SweepResult {
+    bucket_volume: f64,
+    sigma_window: usize,
+    vpin_window: usize,
+    stats: Result<Stats, VpinError>,
+}
+
+/// Runs the full `bucket_volumes x sigma_windows x vpin_windows`
+/// cartesian product and fills in `bvc_accuracy_p_value` on every
+/// successful result by comparing it against the sweep's single best
+/// (highest, non-`NaN`) `bvc_accuracy`.
+fn run_sweep(
+    trades: &[Trade],
+    bucket_volumes: &[f64],
+    sigma_windows: &[usize],
+    vpin_windows: &[usize],
+    cdf_window: Option<usize>,
+) -> Vec<SweepResult> {
+    let mut out =
+        Vec::with_capacity(bucket_volumes.len() * sigma_windows.len() * vpin_windows.len());
+
+    for &bv in bucket_volumes {
+        for &sw in sigma_windows {
+            let bvc = bvc_accuracy_stats(trades, bv, sw);
+
+            for &vw in vpin_windows {
+                let stats = match &bvc {
+                    Ok(bvc_stats) => calibrate_one(trades, bv, sw, vw, cdf_window, *bvc_stats),
+                    Err(e) => Err(*e),
+                };
+                out.push(SweepResult {
+                    bucket_volume: bv,
+                    sigma_window: sw,
+                    vpin_window: vw,
+                    stats,
+                });
+            }
+        }
+    }
+
+    let best_idx = out
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| r.stats.as_ref().ok().map(|s| (i, s.bvc_accuracy)))
+        .filter(|(_, acc)| !acc.is_nan())
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i);
+
+    if let Some(best_idx) = best_idx {
+        let (best_accuracy, best_n) = {
+            let s = out[best_idx].stats.as_ref().unwrap();
+            (s.bvc_accuracy, s.bvc_compared)
+        };
+        for (i, r) in out.iter_mut().enumerate() {
+            if i == best_idx {
+                continue; // nothing to meaningfully compare the best against but itself
+            }
+            if let Ok(s) = &mut r.stats {
+                s.bvc_accuracy_p_value =
+                    two_proportion_p_value(s.bvc_accuracy, s.bvc_compared, best_accuracy, best_n);
+            }
+        }
+    }
+
+    out
 }
 
 fn summarize(values: &[f64]) -> (f64, f64, f64, f64) {
@@ -279,20 +463,22 @@ fn load_trades(path: &str) -> Result<Vec<Trade>, String> {
         .map_err(|e| format!("reading {path}: {e}"))
 }
 
-fn print_report(
-    trades_len: usize,
-    file: &str,
-    bucket_volumes: &[f64],
-    windows: &[usize],
-    cdf_window: Option<usize>,
-    trades: &[Trade],
-) {
+fn format_p_value(p: f64) -> String {
+    if p.is_nan() {
+        "-".to_string()
+    } else {
+        format!("{p:.4}")
+    }
+}
+
+fn print_table(trades_len: usize, file: &str, results: &[SweepResult]) {
     println!("loaded {trades_len} trades from {file}");
     println!();
     println!(
-        "{:>14} {:>8} {:>14} {:>16} {:>10} {:>10} {:>10} {:>10} {:>18} {:>12} {:>10}",
+        "{:>14} {:>12} {:>11} {:>14} {:>16} {:>10} {:>10} {:>10} {:>10} {:>18} {:>12} {:>10} {:>8} {:>12}",
         "bucket_volume",
-        "window",
+        "sigma_window",
+        "vpin_window",
         "total_buckets",
         "non_warmup_reads",
         "vpin_mean",
@@ -301,35 +487,156 @@ fn print_report(
         "vpin_std",
         "avg_interval_ms",
         "bvc_accuracy",
-        "bvc_mae"
+        "bvc_mae",
+        "bvc_n",
+        "bvc_p_value",
     );
 
-    for &bucket_volume in bucket_volumes {
-        for &window in windows {
-            match calibrate_one(trades, bucket_volume, window, cdf_window) {
-                Ok(s) => println!(
-                    "{:>14.4} {:>8} {:>14} {:>16} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>18.1} {:>12.4} {:>10.4}",
-                    s.bucket_volume,
-                    s.window,
-                    s.total_buckets,
-                    s.non_warmup_readings,
-                    s.vpin_mean,
-                    s.vpin_min,
-                    s.vpin_max,
-                    s.vpin_stddev,
-                    s.avg_bucket_interval_ms,
-                    s.bvc_accuracy,
-                    s.bvc_mean_abs_error,
-                ),
-                Err(e) => println!("{bucket_volume:>14.4} {window:>8}  invalid config: {e}"),
-            }
+    for r in results {
+        match &r.stats {
+            Ok(s) => println!(
+                "{:>14.4} {:>12} {:>11} {:>14} {:>16} {:>10.4} {:>10.4} {:>10.4} {:>10.4} {:>18.1} {:>12.4} {:>10.4} {:>8} {:>12}",
+                s.bucket_volume,
+                s.sigma_window,
+                s.vpin_window,
+                s.total_buckets,
+                s.non_warmup_readings,
+                s.vpin_mean,
+                s.vpin_min,
+                s.vpin_max,
+                s.vpin_stddev,
+                s.avg_bucket_interval_ms,
+                s.bvc_accuracy,
+                s.bvc_mean_abs_error,
+                s.bvc_compared,
+                format_p_value(s.bvc_accuracy_p_value),
+            ),
+            Err(e) => println!(
+                "{:>14.4} {:>12} {:>11}  invalid config: {e}",
+                r.bucket_volume, r.sigma_window, r.vpin_window
+            ),
         }
     }
     println!();
     println!(
         "bvc_accuracy: fraction of buckets where BVC's buy/sell majority call matched the real taker-side majority (by volume)."
     );
-    println!("bvc_mae: mean |BVC's buy_fraction - true buy_fraction| across compared buckets. Both NaN if sigma never warmed up.");
+    println!(
+        "bvc_mae: mean |BVC's buy_fraction - true buy_fraction| across compared buckets. Both NaN if sigma never warmed up."
+    );
+    println!(
+        "bvc_p_value: two-proportion z-test p-value vs. the sweep's best bvc_accuracy. \"-\" for the best config itself, or under 30 compared buckets on either side."
+    );
+}
+
+/// RFC 4126-style minimal CSV quoting: wraps in double quotes (doubling
+/// any internal quote) only if the field actually needs it. The only
+/// field here that ever needs it is `error` (a `VpinError`'s `Display`
+/// text can contain a comma, e.g. "window size must be at least 2, got
+/// 0"), every numeric column is comma/quote-free by construction.
+fn csv_escape(s: &str) -> String {
+    if s.contains(',') || s.contains('"') || s.contains('\n') {
+        format!("\"{}\"", s.replace('"', "\"\""))
+    } else {
+        s.to_string()
+    }
+}
+
+fn csv_f64(x: f64) -> String {
+    if x.is_nan() {
+        "NaN".to_string()
+    } else {
+        format!("{x}")
+    }
+}
+
+const CSV_HEADER: &str = "bucket_volume,sigma_window,vpin_window,total_buckets,non_warmup_readings,vpin_mean,vpin_min,vpin_max,vpin_stddev,avg_bucket_interval_ms,bvc_accuracy,bvc_mean_abs_error,bvc_compared,bvc_accuracy_p_value,error";
+
+fn csv_row(r: &SweepResult) -> Vec<String> {
+    match &r.stats {
+        Ok(s) => vec![
+            s.bucket_volume.to_string(),
+            s.sigma_window.to_string(),
+            s.vpin_window.to_string(),
+            s.total_buckets.to_string(),
+            s.non_warmup_readings.to_string(),
+            csv_f64(s.vpin_mean),
+            csv_f64(s.vpin_min),
+            csv_f64(s.vpin_max),
+            csv_f64(s.vpin_stddev),
+            csv_f64(s.avg_bucket_interval_ms),
+            csv_f64(s.bvc_accuracy),
+            csv_f64(s.bvc_mean_abs_error),
+            s.bvc_compared.to_string(),
+            csv_f64(s.bvc_accuracy_p_value),
+            String::new(),
+        ],
+        Err(e) => {
+            let mut fields = vec![
+                r.bucket_volume.to_string(),
+                r.sigma_window.to_string(),
+                r.vpin_window.to_string(),
+            ];
+            // The 11 numeric columns between vpin_window and error
+            // (total_buckets .. bvc_accuracy_p_value): nothing to report,
+            // the config itself was rejected before any of them could be
+            // computed.
+            fields.extend(std::iter::repeat(String::new()).take(11));
+            fields.push(csv_escape(&e.to_string()));
+            fields
+        }
+    }
+}
+
+fn print_csv(results: &[SweepResult]) {
+    println!("{CSV_HEADER}");
+    for r in results {
+        println!("{}", csv_row(r).join(","));
+    }
+}
+
+fn json_f64(x: f64) -> serde_json::Value {
+    if x.is_finite() {
+        serde_json::json!(x)
+    } else {
+        serde_json::Value::Null // JSON has no NaN/Infinity literal
+    }
+}
+
+fn stats_to_json(r: &SweepResult) -> serde_json::Value {
+    match &r.stats {
+        Ok(s) => serde_json::json!({
+            "bucket_volume": s.bucket_volume,
+            "sigma_window": s.sigma_window,
+            "vpin_window": s.vpin_window,
+            "total_buckets": s.total_buckets,
+            "non_warmup_readings": s.non_warmup_readings,
+            "vpin_mean": json_f64(s.vpin_mean),
+            "vpin_min": json_f64(s.vpin_min),
+            "vpin_max": json_f64(s.vpin_max),
+            "vpin_stddev": json_f64(s.vpin_stddev),
+            "avg_bucket_interval_ms": json_f64(s.avg_bucket_interval_ms),
+            "bvc_accuracy": json_f64(s.bvc_accuracy),
+            "bvc_mean_abs_error": json_f64(s.bvc_mean_abs_error),
+            "bvc_compared": s.bvc_compared,
+            "bvc_accuracy_p_value": json_f64(s.bvc_accuracy_p_value),
+            "error": null,
+        }),
+        Err(e) => serde_json::json!({
+            "bucket_volume": r.bucket_volume,
+            "sigma_window": r.sigma_window,
+            "vpin_window": r.vpin_window,
+            "error": e.to_string(),
+        }),
+    }
+}
+
+fn print_json(results: &[SweepResult]) {
+    let rows: Vec<serde_json::Value> = results.iter().map(stats_to_json).collect();
+    match serde_json::to_string_pretty(&rows) {
+        Ok(text) => println!("{text}"),
+        Err(e) => eprintln!("error: failed to serialize results as JSON: {e}"),
+    }
 }
 
 fn main() -> ExitCode {
@@ -357,14 +664,19 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    print_report(
-        trades.len(),
-        &args.file,
-        &args.bucket_volumes,
-        &args.windows,
-        args.cdf_window,
+    let results = run_sweep(
         &trades,
+        &args.bucket_volumes,
+        &args.sigma_windows,
+        &args.vpin_windows,
+        args.cdf_window,
     );
+
+    match args.format {
+        OutputFormat::Table => print_table(trades.len(), &args.file, &results),
+        OutputFormat::Csv => print_csv(&results),
+        OutputFormat::Json => print_json(&results),
+    }
     ExitCode::SUCCESS
 }
 
@@ -378,29 +690,67 @@ mod tests {
             "trades.cap",
             "--bucket-volumes",
             "10,25,50",
-            "--windows",
+            "--sigma-windows",
             "20,50",
+            "--vpin-windows",
+            "30,60",
             "--cdf-window",
             "100",
+            "--format",
+            "csv",
         ]
         .map(String::from);
         let args = parse_args(raw.into_iter()).unwrap();
         assert_eq!(args.file, "trades.cap");
         assert_eq!(args.bucket_volumes, vec![10.0, 25.0, 50.0]);
-        assert_eq!(args.windows, vec![20, 50]);
+        assert_eq!(args.sigma_windows, vec![20, 50]);
+        assert_eq!(args.vpin_windows, vec![30, 60]);
         assert_eq!(args.cdf_window, Some(100));
+        assert_eq!(args.format, OutputFormat::Csv);
     }
 
     #[test]
-    fn cdf_window_is_optional() {
-        let raw = ["trades.cap", "--bucket-volumes", "10", "--windows", "20"].map(String::from);
+    fn cdf_window_and_format_are_optional_with_sane_defaults() {
+        let raw = [
+            "trades.cap",
+            "--bucket-volumes",
+            "10",
+            "--sigma-windows",
+            "20",
+            "--vpin-windows",
+            "20",
+        ]
+        .map(String::from);
         let args = parse_args(raw.into_iter()).unwrap();
         assert_eq!(args.cdf_window, None);
+        assert_eq!(args.format, OutputFormat::Table);
     }
 
     #[test]
     fn missing_required_flag_is_an_error() {
-        let raw = ["trades.cap", "--windows", "20"].map(String::from);
+        let raw = [
+            "trades.cap",
+            "--sigma-windows",
+            "20",
+            "--vpin-windows",
+            "20",
+        ]
+        .map(String::from);
+        assert!(parse_args(raw.into_iter()).is_err());
+    }
+
+    #[test]
+    fn missing_vpin_windows_is_an_error() {
+        // sigma_window and vpin_window sweep independently now, both are
+        // required flags, neither silently falls back to the other.
+        let raw = [
+            "trades.cap",
+            "--bucket-volumes",
+            "10",
+            "--sigma-windows",
+            "20",
+        ]
+        .map(String::from);
         assert!(parse_args(raw.into_iter()).is_err());
     }
 
@@ -411,12 +761,31 @@ mod tests {
     }
 
     #[test]
+    fn unknown_format_is_an_error() {
+        let raw = [
+            "trades.cap",
+            "--bucket-volumes",
+            "10",
+            "--sigma-windows",
+            "20",
+            "--vpin-windows",
+            "20",
+            "--format",
+            "xml",
+        ]
+        .map(String::from);
+        assert!(parse_args(raw.into_iter()).is_err());
+    }
+
+    #[test]
     fn malformed_number_in_csv_is_an_error() {
         let raw = [
             "trades.cap",
             "--bucket-volumes",
             "10,abc,50",
-            "--windows",
+            "--sigma-windows",
+            "20",
+            "--vpin-windows",
             "20",
         ]
         .map(String::from);
@@ -461,12 +830,22 @@ mod tests {
             ts_ns: 0,
             taker_side: TakerSide::Buy,
         }];
-        let result = calibrate_one(&trades, -5.0, 10, None);
+        let result = calibrate_one(
+            &trades,
+            -5.0,
+            10,
+            10,
+            None,
+            BvcStats {
+                accuracy: f64::NAN,
+                mean_abs_error: f64::NAN,
+                compared: 0,
+            },
+        );
         assert!(result.is_err());
     }
 
-    #[test]
-    fn calibrate_one_runs_end_to_end_on_synthetic_trades() {
+    fn synthetic_zigzag_trades(n: u64) -> Vec<Trade> {
         // One trade per bucket (bucket_volume == trade volume), same
         // shape as vpin-engine's own warmup test. Pairing 2+ trades per
         // bucket with a perfectly periodic zigzag makes every bucket's
@@ -475,7 +854,7 @@ mod tests {
         // synthetic test data, not a bug in calibrate_one.
         let mut trades = Vec::new();
         let mut price = 100.0;
-        for i in 0..500u64 {
+        for i in 0..n {
             price += if i % 2 == 0 { 0.4 } else { -0.25 };
             let taker_side = if i % 2 == 0 {
                 TakerSide::Buy
@@ -489,7 +868,14 @@ mod tests {
                 taker_side,
             });
         }
-        let stats = calibrate_one(&trades, 10.0, 10, Some(20)).unwrap();
+        trades
+    }
+
+    #[test]
+    fn calibrate_one_runs_end_to_end_on_synthetic_trades() {
+        let trades = synthetic_zigzag_trades(500);
+        let bvc = bvc_accuracy_stats(&trades, 10.0, 10).unwrap();
+        let stats = calibrate_one(&trades, 10.0, 10, 10, Some(20), bvc).unwrap();
         assert!(stats.total_buckets > 0);
         assert!(stats.non_warmup_readings > 0);
         assert!(stats.vpin_mean >= 0.0 && stats.vpin_mean <= 1.0);
@@ -515,9 +901,10 @@ mod tests {
                 taker_side: TakerSide::Buy,
             })
             .collect::<Vec<_>>();
-        let (accuracy, mae) = bvc_accuracy_stats(&trades, 10.0, 1000).unwrap();
-        assert!(accuracy.is_nan());
-        assert!(mae.is_nan());
+        let bvc = bvc_accuracy_stats(&trades, 10.0, 1000).unwrap();
+        assert!(bvc.accuracy.is_nan());
+        assert!(bvc.mean_abs_error.is_nan());
+        assert_eq!(bvc.compared, 0);
     }
 
     #[test]
@@ -546,11 +933,135 @@ mod tests {
                 },
             });
         }
-        let (accuracy, _mae) = bvc_accuracy_stats(&trades, 10.0, 20).unwrap();
-        assert!(!accuracy.is_nan());
+        let bvc = bvc_accuracy_stats(&trades, 10.0, 20).unwrap();
+        assert!(!bvc.accuracy.is_nan());
         assert!(
-            accuracy > 0.95,
-            "expected near-perfect accuracy on a tape constructed to align, got {accuracy}"
+            bvc.accuracy > 0.95,
+            "expected near-perfect accuracy on a tape constructed to align, got {}",
+            bvc.accuracy
         );
+    }
+
+    #[test]
+    fn two_proportion_p_value_is_one_for_identical_large_samples() {
+        let p = two_proportion_p_value(0.8, 200, 0.8, 200);
+        assert!((p - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn two_proportion_p_value_is_small_for_a_clear_difference() {
+        // 95% vs 60% accuracy, 200 compared on each side: not a subtle
+        // difference, should come back very significant.
+        let p = two_proportion_p_value(0.95, 200, 0.60, 200);
+        assert!(p < 0.001, "expected a tiny p-value, got {p}");
+    }
+
+    #[test]
+    fn two_proportion_p_value_is_nan_below_min_compared() {
+        assert!(two_proportion_p_value(0.9, 10, 0.5, 200).is_nan());
+        assert!(two_proportion_p_value(0.9, 200, 0.5, 10).is_nan());
+    }
+
+    #[test]
+    fn two_proportion_p_value_is_nan_for_nan_inputs() {
+        assert!(two_proportion_p_value(f64::NAN, 200, 0.5, 200).is_nan());
+    }
+
+    #[test]
+    fn run_sweep_covers_the_full_cartesian_product() {
+        let trades = synthetic_zigzag_trades(500);
+        let results = run_sweep(&trades, &[10.0, 20.0], &[10, 20], &[10, 15], None);
+        assert_eq!(results.len(), 2 * 2 * 2);
+    }
+
+    #[test]
+    fn run_sweep_reuses_bvc_stats_across_vpin_windows() {
+        // bvc_accuracy depends only on (bucket_volume, sigma_window),
+        // not vpin_window, see bvc_accuracy_stats's doc comment. If
+        // run_sweep is actually reusing that computation rather than
+        // silently recomputing it differently per vpin_window, every
+        // vpin_window at a fixed (bucket_volume, sigma_window) must
+        // report the exact same bvc_accuracy and bvc_compared.
+        let trades = synthetic_zigzag_trades(500);
+        let results = run_sweep(&trades, &[10.0], &[10], &[5, 10, 20, 50], None);
+        let accuracies: Vec<f64> = results
+            .iter()
+            .map(|r| r.stats.as_ref().unwrap().bvc_accuracy)
+            .collect();
+        assert!(
+            accuracies.windows(2).all(|w| w[0] == w[1]),
+            "expected identical bvc_accuracy across vpin_windows, got {accuracies:?}"
+        );
+    }
+
+    #[test]
+    fn run_sweep_gives_the_best_config_a_nan_p_value_and_others_a_real_one() {
+        let trades = synthetic_zigzag_trades(500);
+        let results = run_sweep(&trades, &[10.0, 20.0, 30.0], &[10, 15], &[10], None);
+
+        let best_idx = results
+            .iter()
+            .enumerate()
+            .filter_map(|(i, r)| r.stats.as_ref().ok().map(|s| (i, s.bvc_accuracy)))
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+            .unwrap();
+
+        assert!(results[best_idx]
+            .stats
+            .as_ref()
+            .unwrap()
+            .bvc_accuracy_p_value
+            .is_nan());
+
+        let any_other_has_a_real_p_value = results
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != best_idx)
+            .filter_map(|(_, r)| r.stats.as_ref().ok())
+            .any(|s| !s.bvc_accuracy_p_value.is_nan());
+        assert!(
+            any_other_has_a_real_p_value,
+            "expected at least one non-best config to get a real p-value"
+        );
+    }
+
+    #[test]
+    fn csv_escape_only_quotes_when_needed() {
+        assert_eq!(csv_escape("plain"), "plain");
+        assert_eq!(csv_escape("has,comma"), "\"has,comma\"");
+        assert_eq!(csv_escape("has\"quote"), "\"has\"\"quote\"");
+    }
+
+    #[test]
+    fn csv_rows_have_the_same_field_count_as_the_header() {
+        let trades = synthetic_zigzag_trades(200);
+        let results = run_sweep(&trades, &[10.0, -5.0], &[10], &[10], None); // -5.0 forces an Err row too
+        let header_fields = CSV_HEADER.split(',').count();
+        for r in &results {
+            let row = csv_row(r);
+            assert_eq!(
+                row.len(),
+                header_fields,
+                "row {:?} has {} fields, header has {header_fields}",
+                row,
+                row.len()
+            );
+        }
+    }
+
+    #[test]
+    fn json_output_is_valid_and_has_the_expected_shape() {
+        let trades = synthetic_zigzag_trades(200);
+        let results = run_sweep(&trades, &[10.0, -5.0], &[10], &[10], None);
+        let rows: Vec<serde_json::Value> = results.iter().map(stats_to_json).collect();
+        let text = serde_json::to_string(&rows).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let arr = parsed.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert!(arr[0].get("bvc_accuracy").is_some());
+        // the bucket_volume=-5.0 row is the Err case, no bvc_accuracy key at all
+        assert!(arr[1].get("error").is_some());
+        assert!(arr[1].get("bvc_accuracy").is_none());
     }
 }
